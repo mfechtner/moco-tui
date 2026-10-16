@@ -63,6 +63,18 @@ class Moco:
     def invoices_with_tag(self, tag: str) -> list[dict]:
         return self.get_all("/invoices", {"tags": tag, "include_disregarded": "true"})
 
+    def invoices(self, status: str | None = None) -> list[dict]:
+        return self.get_all("/invoices", {"status": status} if status else {})
+
+    def invoice(self, invoice_id: int) -> dict:
+        return self.call("GET", f"/invoices/{invoice_id}").json()
+
+    def invoice_timesheet(self, invoice_id: int) -> list[dict]:
+        return self.call("GET", f"/invoices/{invoice_id}/timesheet").json()
+
+    def delete_invoice(self, invoice_id: int) -> None:
+        self.call("DELETE", f"/invoices/{invoice_id}")
+
     def create_invoice(self, payload: dict) -> dict:
         return self.call("POST", "/invoices", json=payload).json()
 

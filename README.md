@@ -29,6 +29,7 @@ First start opens a setup screen. You need:
 | `g`     | AI suggestions for the offer    |
 | `/`     | Filter by no., customer, title  |
 | `o`     | Open offer in MOCO              |
+| `i`     | Invoices (list, details, edit drafts) |
 | `h`     | History of created drafts       |
 | `s`     | Settings                        |
 | `r`     | Reload                          |
@@ -49,6 +50,31 @@ First start opens a setup screen. You need:
 - All items (titles, descriptions, subtotals, expenses, revenue categories)
 - Optional items: left out (setting)
 - Tag `Angebot <offer no.>` → used to prevent duplicates
+
+## Invoices (`i`)
+
+- List by status: draft, created, sent, overdue, partially paid, paid, ignored
+- `enter` → details: overview, items, texts, payments
+- `e` → **edit a draft**
+
+### Edit a draft
+
+| Tab              | What you can change                                 |
+| ---------------- | --------------------------------------------------- |
+| 1 Header & texts | title, dates, service period, discount, address, intro, footer |
+| 2 Items          | `a` add · `e`/`enter` edit · `d` delete · `shift+↑↓` move |
+
+`ctrl+s` saves. MOCO's API cannot update invoices, so saving:
+
+1. creates a **new draft** with your changes
+2. deletes the old draft
+
+New first → if anything fails, nothing is lost.
+
+**Read-only:**
+
+- Final invoices (only a reversal may change them)
+- Drafts with linked time entries or expenses (recreating would drop the links → edit in MOCO)
 
 ## AI per item (optional)
 

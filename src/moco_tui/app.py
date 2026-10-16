@@ -27,6 +27,8 @@ from textual.widgets import (
 
 from moco_tui import __version__, ai
 from moco_tui.api import Moco
+from moco_tui.invoice_screens import InvoicesScreen
+from moco_tui.invoices import InvoiceService
 from moco_tui.service import HAS_DRAFT, INVOICED, NO_CUSTOMER, READY, Service, build_invoice
 from moco_tui.store import Settings, Store
 
@@ -714,7 +716,23 @@ class MocoApp(App):
               background: $surface; }
     .q { width: 100%; padding-bottom: 1; }
     #o_items { height: 1fr; }
-    #o_head { height: 2; padding: 1 2 0 2; }
+    #o_head, #i_head, #e_bar { height: 2; padding: 1 2 0 2; }
+    #invoices { height: 1fr; }
+    #isummary { padding: 1 0 0 2; color: $accent; }
+    #istatus { width: 26; }
+    #ifilter { width: 30; }
+    InvoiceScreen TabbedContent, DraftEditor TabbedContent { height: 1fr; }
+    InvoiceScreen TabPane, DraftEditor TabPane { height: 1fr; }
+    #i_table, #e_table { height: 1fr; }
+    .form { padding: 0 2; }
+    .form Label { padding-top: 1; }
+    .form TextArea { height: 6; }
+    ItemEditor, ConfirmBox { align: center middle; }
+    .item-editor { height: 90%; }
+    .item-editor TextArea { height: 6; }
+    .item-editor Label { padding-top: 1; }
+    .row { height: auto; }
+    .row Vertical { height: auto; width: 1fr; margin-right: 1; }
     OfferScreen TabbedContent { height: 1fr; }
     OfferScreen TabPane { height: 1fr; }
     .desc { height: auto; max-height: 10; padding: 1 1; border-top: tall $primary; }
@@ -737,6 +755,7 @@ class MocoApp(App):
         Binding("enter", "details", "Details", show=True),
         Binding("o", "open", "Open"),
         Binding("slash", "filter", "Filter"),
+        Binding("i", "invoices", "Invoices"),
         Binding("h", "history", "History"),
         Binding("s", "settings", "Settings"),
         Binding("r", "reload", "Reload"),
@@ -745,6 +764,7 @@ class MocoApp(App):
 
     MAIN_ONLY = {
         "details",
+        "invoices",
         "toggle",
         "select_ready",
         "select_none",
@@ -1151,6 +1171,12 @@ class MocoApp(App):
             self.query_one("#offers", DataTable).focus()
 
         self.push_screen(AIReviewScreen(offer, sugg), done)
+
+    def action_invoices(self) -> None:
+        if self.svc:
+            self.push_screen(
+                InvoicesScreen(InvoiceService(self.svc.api, self.store, self.cfg.domain))
+            )
 
     def action_history(self) -> None:
         if self.svc:

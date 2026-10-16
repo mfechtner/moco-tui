@@ -176,3 +176,11 @@ class Store:
     def clear_overrides(self, offer_id: int) -> None:
         with self.con:
             self.con.execute("DELETE FROM ai_overrides WHERE offer_id = ?", (offer_id,))
+
+    def remap_draft(self, old_invoice_id: int, new_invoice_id: int) -> None:
+        """A draft was replaced (edit = recreate). Keep history pointing to the new one."""
+        with self.con:
+            self.con.execute(
+                "UPDATE drafts SET invoice_id = ? WHERE invoice_id = ?",
+                (new_invoice_id, old_invoice_id),
+            )

@@ -145,3 +145,64 @@ async def test_offer_details_create(store, patched):
         await pilot.press("y")
         await pilot.pause(0.4)
         assert len(patched.posted) == 1
+
+
+async def test_invoice_edit_flow(store, patched):
+    from textual.widgets import Input
+
+    from moco_tui.invoice_screens import (
+        DraftEditor,
+        InvoiceScreen,
+        InvoicesScreen,
+        ItemEditor,
+    )
+
+    store.save_settings(Settings(domain="acme", api_key="k"))
+    app = MocoApp(store)
+    async with app.run_test(size=(150, 45)) as pilot:
+        await wait_loaded(app, pilot)
+        await pilot.press("i")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, InvoicesScreen)
+        assert app.screen.query_one("#invoices").row_count == 2  # drafts only
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, InvoiceScreen)
+        await pilot.press("e")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, DraftEditor)
+        await pilot.press("down", "enter")  # edit item 1 (Beratung)
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, ItemEditor)
+        app.screen.query_one("#t_qty", Input).value = "3"
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.1)
+        await pilot.press("d")  # delete Beratung? cursor is on item 1 -> deletes it
+        await pilot.pause(0.1)
+        assert len(app.screen.items) == 2
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.1)
+        await pilot.press("y")
+        await pilot.pause(0.5)
+        assert patched.deleted == [900]
+        assert [i.get("title") for i in patched.posted[-1]["items"]] == ["Leistungen", "Pauschale"]
+
+
+async def test_final_invoice_read_only(store, patched):
+    from textual.widgets import Select
+
+    from moco_tui.invoice_screens import DraftEditor
+
+    store.save_settings(Settings(domain="acme", api_key="k"))
+    app = MocoApp(store)
+    async with app.run_test(size=(150, 45)) as pilot:
+        await wait_loaded(app, pilot)
+        await pilot.press("i")
+        await pilot.pause(0.3)
+        app.screen.query_one("#istatus", Select).value = "sent"
+        await pilot.pause(0.3)
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        await pilot.press("e")
+        await pilot.pause(0.2)
+        assert not isinstance(app.screen, DraftEditor)
