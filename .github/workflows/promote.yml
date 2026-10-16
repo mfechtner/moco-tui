@@ -1,0 +1,56 @@
+name: Promote to PyPI
+
+# Manual: Actions -> "Promote to PyPI" -> enter tag (e.g. v0.2.0).
+# Publishes the exact files of that GitHub release (same bytes as on TestPyPI).
+# The "pypi" environment should require a reviewer = approval step.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to promote (e.g. v0.2.0)"
+        required: true
+      allow_prerelease:
+        description: "Allow promoting a pre-release (rc/a/b)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/moco-tui/
+    permissions:
+      contents: write   # mark release as latest
+      id-token: write   # trusted publishing
+    steps:
+      - name: Check release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          pre=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease -q .isPrerelease)
+          if [ "$pre" = "true" ] && [ "${{ inputs.allow_prerelease }}" != "true" ]; then
+            echo "::error::$TAG is a pre-release. Tick 'allow_prerelease' to promote it anyway."
+            exit 1
+          fi
+      - name: Download release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir dist
+          gh release download "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" \
+            --dir dist --pattern "*.whl" --pattern "*.tar.gz"
+          ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Note promotion on release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" \
+            --notes-file <(gh release view "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" \
+              --json body -q .body; echo; echo "✅ Promoted to PyPI by @${{ github.actor }}")
