@@ -20,6 +20,8 @@ from textual.widgets import (
     Select,
     Static,
     Switch,
+    TabbedContent,
+    TabPane,
     TextArea,
 )
 
@@ -48,6 +50,11 @@ def money(v, cur) -> str:
     except (TypeError, ValueError):
         return "–"
     return s.replace(",", "X").replace(".", ",").replace("X", ".") + f" {cur or ''}"
+
+
+def escape_rich(text: str) -> str:
+    """Show text from MOCO literally (no [markup] interpretation)."""
+    return (text or "").replace("[", "\\[")
 
 
 def open_url(url: str) -> None:
@@ -454,6 +461,232 @@ class AIReviewScreen(Screen):
         self.dismiss(None)
 
 
+# --------------------------------------------------------------------------- offer detail
+class OfferScreen(Screen[str | None]):
+    """Full offer inside the TUI. Dismisses with "ai", "create" or None."""
+
+    BINDINGS = [
+        Binding("escape,backspace", "back", "Back"),
+        Binding("1", "tab('t_over')", "Overview"),
+        Binding("2", "tab('t_items')", "Items"),
+        Binding("3", "tab('t_time')", "Time"),
+        Binding("4", "tab('t_draft')", "Draft"),
+        Binding("g", "ai", "AI"),
+        Binding("c", "create", "Create draft"),
+        Binding("o", "open", "Open in MOCO"),
+    ]
+
+    def __init__(self, offer_id: int, state: str, svc: Service, store: Store, cached=None):
+        super().__init__()
+        self.oid, self.state_key, self.svc, self.store = offer_id, state, svc, store
+        self.offer = cached
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("Loading offer …", id="o_head")
+        with TabbedContent(initial="t_over"):
+            with TabPane("1 Overview", id="t_over"), VerticalScroll():
+                yield Static("", id="o_over")
+            with TabPane("2 Items", id="t_items"):
+                yield DataTable(id="o_items", cursor_type="row", zebra_stripes=True)
+                yield Static("", id="o_item_desc", classes="desc")
+            with TabPane("3 Time entries", id="t_time"), VerticalScroll():
+                yield Static("[dim]Loading time entries …[/dim]", id="o_time")
+            with TabPane("4 Invoice draft", id="t_draft"), VerticalScroll():
+                yield Static("", id="o_draft")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        t = self.query_one("#o_items", DataTable)
+        for label, key in [
+            ("#", "i"),
+            ("Type", "type"),
+            ("Title", "title"),
+            ("Qty", "qty"),
+            ("Unit", "unit"),
+            ("Price", "price"),
+            ("Total", "total"),
+            ("", "flags"),
+        ]:
+            t.add_column(label, key=key)
+        if self.offer:
+            self.render_offer()
+        self.load()
+
+    @work(thread=True, exclusive=True)
+    def load(self) -> None:
+        try:
+            if not self.offer:
+                self.offer = self.svc.api.offer(self.oid)
+                self.app.call_from_thread(self.render_offer)
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(
+                self.query_one("#o_head", Static).update, f"[red]Could not load offer: {e}[/]"
+            )
+            return
+        try:
+            acts = self.svc.activities_for(self.offer)
+            self.app.call_from_thread(self.render_time, acts)
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(
+                self.query_one("#o_time", Static).update, f"[red]Time entries failed: {e}[/]"
+            )
+
+    # ---- rendering
+    def render_offer(self) -> None:
+        o, cur = self.offer, self.offer.get("currency")
+        label, style = STATE.get(self.state_key, ("", ""))
+        self.query_one("#o_head", Static).update(
+            f"[b]{escape_rich(o.get('identifier'))}[/b]  {escape_rich(o.get('title'))}"
+            f"   [{style}]{label}[/]"
+        )
+        vat = o.get("vat") or {}
+        person = o.get("user") or {}
+        rows = [
+            ("Customer", escape_rich((o.get("company") or {}).get("name"))),
+            ("Project", escape_rich((o.get("project") or {}).get("name"))),
+            ("Deal", escape_rich((o.get("deal") or {}).get("name"))),
+            ("Status", o.get("status")),
+            ("Date", o.get("date")),
+            ("Valid until", o.get("due_date")),
+            ("Created by", f"{person.get('firstname', '')} {person.get('lastname', '')}".strip()),
+            ("", ""),
+            ("Net", money(o.get("net_total"), cur)),
+            ("VAT", f"{vat.get('tax', o.get('tax', '–'))} %"),
+            ("Discount", f"{o.get('discount') or 0} %"),
+            (
+                "Gross",
+                f"[b]{money(o.get('gross_total'), cur)}[/b]" if o.get("gross_total") else None,
+            ),
+            ("Tags", escape_rich(", ".join(o.get("tags") or []))),
+        ]
+        lines = [
+            f"[dim]{k:<12}[/dim] {v if v not in (None, '') else '–'}" if k else "" for k, v in rows
+        ]
+        if o.get("recipient_address"):
+            addr = escape_rich(o["recipient_address"].replace("\r", ""))
+            lines += ["", "[b u]Recipient[/]", addr]
+        if o.get("salutation"):
+            lines += ["", "[b u]Intro text[/]", escape_rich(ai.strip_html(o["salutation"]))]
+        if o.get("footer"):
+            lines += ["", "[b u]Footer text[/]", escape_rich(ai.strip_html(o["footer"]))]
+        lines += ["", "[dim]1–4 tabs · g AI · c create draft · o open in MOCO · esc back[/dim]"]
+        self.query_one("#o_over", Static).update("\n".join(lines))
+
+        t = self.query_one("#o_items", DataTable)
+        t.clear()
+        for i, it in enumerate(o.get("items", [])):
+            typ = it.get("type") or ""
+            title = it.get("title") or ai.strip_html(it.get("description"))[:60] or ""
+            flags = []
+            if it.get("optional"):
+                flags.append("[yellow]optional[/]")
+            if it.get("service_type") == "expense":
+                flags.append("[cyan]expense[/]")
+            if typ == "item":
+                qty = f"{it['quantity']:g}" if isinstance(it.get("quantity"), (int, float)) else ""
+                price = money(it.get("unit_price"), "") if it.get("unit_price") else ""
+                total = money(it.get("net_total"), cur)
+            else:
+                qty = price = total = ""
+            style = (
+                "b" if typ == "title" else ("dim" if typ in ("description", "separator") else "")
+            )
+            t.add_row(
+                str(i),
+                typ,
+                f"[{style}]{title}[/]" if style else title,
+                qty,
+                it.get("unit") or "",
+                price,
+                total,
+                " ".join(flags),
+                key=str(i),
+            )
+        self.render_draft()
+
+    def render_time(self, acts: list[dict]) -> None:
+        groups = ai.summarize_activities(acts)
+        total_all = sum(float(a.get("hours") or 0) for a in acts)
+        if not acts:
+            text = "[dim]No time entries for this project since the offer date.[/dim]"
+            if not (self.offer.get("project") or {}).get("id"):
+                text = "[yellow]Offer has no project → no time entries.[/yellow]"
+            self.query_one("#o_time", Static).update(text)
+            return
+        open_h = sum(g["hours"] for g in groups)
+        lines = [
+            f"[b]{open_h:g} h[/b] billable, not yet billed  [dim](of {total_all:g} h total)[/dim]",
+            "",
+        ]
+        for g in sorted(groups, key=lambda x: -x["hours"]):
+            lines.append(f"[b]{escape_rich(g['task'])}[/b]  {g['hours']:g} h")
+            lines += [f"  • {escape_rich(n)}" for n in g["notes"][:15]]
+            if len(g["notes"]) > 15:
+                lines.append(f"  [dim]… {len(g['notes']) - 15} more[/dim]")
+            lines.append("")
+        self.query_one("#o_time", Static).update("\n".join(lines))
+
+    def render_draft(self) -> None:
+        o, cur = self.offer, self.offer.get("currency")
+        inv = build_invoice(o, self.svc.cfg, overrides=self.store.load_overrides(self.oid))
+        net = sum(
+            (it["quantity"] * it["unit_price"]) if "unit_price" in it else it.get("net_total", 0)
+            for it in inv["items"]
+            if it["type"] == "item" and not it.get("optional")
+        )
+        lines = [
+            f"[b]{escape_rich(inv['title'])}[/b]",
+            f"[dim]Date[/dim] {inv['date']}   [dim]Due[/dim] {inv['due_date']}   "
+            f"[dim]VAT[/dim] {inv['tax']} %",
+            "",
+        ]
+        for it in inv["items"]:
+            if it["type"] == "title":
+                lines.append(f"\n[b]{escape_rich(it['title'] or '')}[/b]")
+            elif it["type"] == "item":
+                amt = it["quantity"] * it["unit_price"] if "unit_price" in it else it["net_total"]
+                q = (
+                    f"  [dim]{it['quantity']:g} {it.get('unit') or ''} × {it['unit_price']}[/dim]"
+                    if "unit_price" in it
+                    else ""
+                )
+                lines.append(f"• {escape_rich(it['title'] or '')}{q}  {money(amt, cur)}")
+                if it.get("description"):
+                    lines.append(f"  [dim]{escape_rich(ai.strip_html(it['description']))}[/dim]")
+        lines += ["", f"Net (before discount)  [b]{money(net, cur)}[/b]"]
+        self.query_one("#o_draft", Static).update("\n".join(lines))
+
+    @on(DataTable.RowHighlighted, "#o_items")
+    def item_highlighted(self, e: DataTable.RowHighlighted) -> None:
+        if e.row_key is None or not self.offer:
+            return
+        it = self.offer.get("items", [])[int(e.row_key.value)]
+        d = ai.strip_html(it.get("description"))
+        self.query_one("#o_item_desc", Static).update(
+            escape_rich(d) if d else "[dim]No description[/dim]"
+        )
+
+    # ---- actions
+    def action_tab(self, tab: str) -> None:
+        self.query_one(TabbedContent).active = tab
+
+    def action_back(self) -> None:
+        self.dismiss(None)
+
+    def action_ai(self) -> None:
+        self.dismiss("ai")
+
+    def action_create(self) -> None:
+        if self.state_key != READY:
+            self.notify("Only READY offers can become a draft.", severity="warning")
+            return
+        self.dismiss("create")
+
+    def action_open(self) -> None:
+        open_url(self.svc.web_url("offers", self.oid))
+
+
 # --------------------------------------------------------------------------- main
 class MocoApp(App):
     TITLE = "MOCO · Offers → Invoice drafts"
@@ -480,6 +713,12 @@ class MocoApp(App):
     .dialog { width: 64; height: auto; padding: 1 2; border: thick $warning;
               background: $surface; }
     .q { width: 100%; padding-bottom: 1; }
+    #o_items { height: 1fr; }
+    #o_head { height: 2; padding: 1 2 0 2; }
+    OfferScreen TabbedContent { height: 1fr; }
+    OfferScreen TabPane { height: 1fr; }
+    .desc { height: auto; max-height: 10; padding: 1 1; border-top: tall $primary; }
+    TabPane { padding: 0 1; }
     EditItem { align: center middle; }
     .wide { width: 90; }
     #e_desc { height: 10; }
@@ -495,6 +734,7 @@ class MocoApp(App):
         Binding("c", "create", "Create"),
         Binding("d", "dry_run", "Dry run"),
         Binding("g", "ai", "AI"),
+        Binding("enter", "details", "Details", show=True),
         Binding("o", "open", "Open"),
         Binding("slash", "filter", "Filter"),
         Binding("h", "history", "History"),
@@ -504,6 +744,7 @@ class MocoApp(App):
     ]
 
     MAIN_ONLY = {
+        "details",
         "toggle",
         "select_ready",
         "select_none",
@@ -718,6 +959,37 @@ class MocoApp(App):
                 self.selected.discard(oid)
             self.refresh_row(oid)
 
+    # ---- detail screen (enter)
+    @on(DataTable.RowSelected, "#offers")
+    def row_selected(self, e: DataTable.RowSelected) -> None:
+        if e.row_key is not None and e.row_key.value:
+            self.open_offer(int(e.row_key.value))
+
+    def action_details(self) -> None:
+        oid = self.current_id()
+        if oid is not None:
+            self.open_offer(oid)
+
+    def open_offer(self, oid: int) -> None:
+        if not self.svc:
+            return
+
+        def done(result: str | None) -> None:
+            self.query_one("#offers", DataTable).focus()
+            if oid in self.details:
+                self.show_preview(oid)
+            if result == "ai":
+                self.action_ai()
+            elif result == "create":
+                self.selected = {oid}
+                self.rebuild_table()
+                self.action_create()
+
+        self.push_screen(
+            OfferScreen(oid, self.state.get(oid, ""), self.svc, self.store, self.details.get(oid)),
+            done,
+        )
+
     # ---- preview
     @on(DataTable.RowHighlighted, "#offers")
     def highlighted(self, e: DataTable.RowHighlighted) -> None:
@@ -738,6 +1010,12 @@ class MocoApp(App):
             self.call_from_thread(self.show_preview, oid)
 
     def show_preview(self, oid: int) -> None:
+        try:
+            self._show_preview(oid)
+        except Exception as e:  # noqa: BLE001  (unexpected MOCO data must not crash the app)
+            self.query_one("#pv", Static).update(f"[red]Preview failed: {escape_rich(str(e))}[/]")
+
+    def _show_preview(self, oid: int) -> None:
         o = self.details[oid]
         ov = self.store.load_overrides(oid)
         inv = build_invoice(o, self.cfg, overrides=ov)

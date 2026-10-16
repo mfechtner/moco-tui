@@ -108,3 +108,40 @@ async def test_ai_review_flow(store, patched, monkeypatch):
         await pilot.pause(0.4)
         design = next(i for i in patched.posted[0]["items"] if i.get("title") == "Design umgesetzt")
         assert design["quantity"] == 3.5
+
+
+async def test_enter_opens_offer_details(store, patched):
+    from textual.widgets import TabbedContent
+
+    from moco_tui.app import OfferScreen
+
+    store.save_settings(Settings(domain="acme", api_key="k"))
+    app = MocoApp(store)
+    async with app.run_test(size=(150, 45)) as pilot:
+        await wait_loaded(app, pilot)
+        await pilot.press("enter")
+        await pilot.pause(0.4)
+        assert isinstance(app.screen, OfferScreen)
+        assert len(app.screen_stack) == 2  # opened once, not twice
+        assert app.screen.query_one("#o_items").row_count == 5
+        await pilot.press("3")
+        await pilot.pause(0.2)
+        assert app.screen.query_one(TabbedContent).active == "t_time"
+        assert "28 h" in str(app.screen.query_one("#o_time").render())
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert not isinstance(app.screen, OfferScreen)
+
+
+async def test_offer_details_create(store, patched):
+    store.save_settings(Settings(domain="acme", api_key="k"))
+    app = MocoApp(store)
+    async with app.run_test(size=(150, 45)) as pilot:
+        await wait_loaded(app, pilot)
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        await pilot.press("c")
+        await pilot.pause(0.2)
+        await pilot.press("y")
+        await pilot.pause(0.4)
+        assert len(patched.posted) == 1

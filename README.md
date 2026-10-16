@@ -20,6 +20,7 @@ First start opens a setup screen. You need:
 
 | Key     | Action                          |
 | ------- | ------------------------------- |
+| `enter` | Open offer details (tabs: overview, items, time, draft) |
 | `space` | Select / unselect offer         |
 | `a`     | Select all ready offers         |
 | `n`     | Select none                     |
