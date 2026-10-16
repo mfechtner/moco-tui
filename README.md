@@ -72,16 +72,27 @@ Quantities never change unless you press `u`.
 
 ### Setup
 
-Settings (`s`) → AI section. Any **OpenAI-compatible** endpoint works:
+Settings (`s`) → AI → pick a **provider**, paste the key, set the model.
+Endpoint URL can stay empty (provider default).
 
-| Provider   | Endpoint URL                     | Key   | Model example   |
-| ---------- | -------------------------------- | ----- | --------------- |
-| OpenAI     | `https://api.openai.com/v1`      | yes   | `gpt-4o-mini`   |
-| Ollama     | `http://localhost:11434/v1`      | empty | `llama3.1`      |
-| LM Studio  | `http://localhost:1234/v1`       | empty | your model      |
-| OpenRouter | `https://openrouter.ai/api/v1`   | yes   | any             |
+| Provider        | Format                 | Key   | Model example        |
+| --------------- | ---------------------- | ----- | -------------------- |
+| Anthropic       | native Messages API    | yes   | `claude-sonnet-5-5`  |
+| OpenAI          | chat/completions       | yes   | your model           |
+| Google Gemini   | OpenAI-compatible      | yes   | your model           |
+| Mistral         | OpenAI-compatible      | yes   | your model           |
+| OpenRouter      | OpenAI-compatible      | yes   | `vendor/model`       |
+| Groq            | OpenAI-compatible      | yes   | your model           |
+| Ollama          | local                  | no    | `llama3.1`           |
+| LM Studio       | local                  | no    | loaded model         |
+| Custom          | any OpenAI-compatible  | opt.  | –                    |
 
-Env vars override: `MOCO_TUI_AI_BASE_URL`, `MOCO_TUI_AI_API_KEY`, `MOCO_TUI_AI_MODEL`.
+- No `temperature` is sent (newer models reject it).
+- If a provider rejects an optional parameter, the request is retried without it.
+- Anthropic's OpenAI-compatible endpoint also works via **Custom**.
+
+Env vars override: `MOCO_TUI_AI_PROVIDER`, `MOCO_TUI_AI_BASE_URL`,
+`MOCO_TUI_AI_API_KEY`, `MOCO_TUI_AI_MODEL`.
 
 Sent to the AI: offer items, task names, booked hours, time-entry descriptions.
 Use a local model if that data must stay on your machine.

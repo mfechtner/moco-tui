@@ -122,19 +122,21 @@ class SettingsScreen(Screen[Settings | None]):
             with Horizontal(classes="sw"):
                 yield Switch(c.mark_offer_billed, id="mark_offer_billed")
                 yield Label("Set offer to 'billed' after draft")
-            yield Static(
-                "\n[b]AI[/b]  [dim]any OpenAI-compatible endpoint · optional[/dim]",
-                classes="section",
+            yield Static("\n[b]AI[/b]  [dim]optional[/dim]", classes="section")
+            prov = ai.detect_provider(c.ai_provider, c.ai_base_url, c.ai_model)
+            yield Label("Provider")
+            yield Select(
+                [(p.label, p.key) for p in ai.PROVIDERS.values()],
+                value=prov or Select.NULL,
+                prompt="Choose …",
+                id="ai_provider",
             )
-            yield Label(
-                "Endpoint URL  [dim](e.g. https://api.openai.com/v1 · "
-                "http://localhost:11434/v1)[/dim]"
-            )
-            yield Input(c.ai_base_url, placeholder="https://…/v1", id="ai_base_url")
+            yield Label("Endpoint URL  [dim](empty = provider default)[/dim]")
+            yield Input(c.ai_base_url, placeholder="provider default", id="ai_base_url")
             yield Label("API key  [dim](empty for local models)[/dim]")
             yield Input(c.ai_api_key, password=True, id="ai_api_key")
             yield Label("Model")
-            yield Input(c.ai_model, placeholder="gpt-4o-mini · llama3.1 · …", id="ai_model")
+            yield Input(c.ai_model, placeholder="model name", id="ai_model")
             yield Label("Language of invoice texts")
             yield Input(c.ai_language, id="ai_language")
             yield Button("Test AI", id="test_ai")
@@ -157,6 +159,9 @@ class SettingsScreen(Screen[Settings | None]):
             mark_offer_billed=q("#mark_offer_billed", Switch).value,
             title_prefix=q("#title_prefix", Input).value,
             tag_prefix=q("#tag_prefix", Input).value or "Angebot",
+            ai_provider=(
+                "" if q("#ai_provider", Select).is_blank() else q("#ai_provider", Select).value
+            ),
             ai_base_url=q("#ai_base_url", Input).value.strip(),
             ai_api_key=q("#ai_api_key", Input).value.strip(),
             ai_model=q("#ai_model", Input).value.strip(),
@@ -179,6 +184,25 @@ class SettingsScreen(Screen[Settings | None]):
             msg = f"[red]✗ {e}[/]"
         self.app.call_from_thread(out.update, msg)
 
+    @on(Select.Changed, "#ai_provider")
+    def provider_changed(self, e: Select.Changed) -> None:
+        p = (
+            ai.PROVIDERS.get(e.value)
+            if not self.query_one("#ai_provider", Select).is_blank()
+            else None
+        )
+        if not p:
+            return
+        url = self.query_one("#ai_base_url", Input)
+        url.placeholder = p.base_url or "https://…/v1"
+        # clear a URL that belongs to another provider preset
+        if url.value and any(url.value.rstrip("/") == x.base_url for x in ai.PROVIDERS.values()):
+            url.value = ""
+        model = self.query_one("#ai_model", Input)
+        model.placeholder = p.model_hint
+        if not model.value and p.key == "anthropic":
+            model.value = p.model_hint
+
     @on(Button.Pressed, "#test_ai")
     def test_ai(self) -> None:
         self.query_one("#test_ai_result", Static).update("[dim]Asking the model …[/dim]")
@@ -189,11 +213,13 @@ class SettingsScreen(Screen[Settings | None]):
         out = self.query_one("#test_ai_result", Static)
         try:
             if not cfg.ai_ready:
-                raise ai.AIError("Endpoint URL and model are required.")
-            reply = ai.AIClient(cfg.ai_base_url, cfg.ai_api_key, cfg.ai_model, timeout=30).chat(
-                "Reply with exactly: OK", "Ping"
+                raise ai.AIError("Provider and model are required.")
+            client = ai.AIClient(
+                cfg.ai_base_url, cfg.ai_api_key, cfg.ai_model, timeout=30, provider=cfg.ai_provider
             )
-            msg = f"[green]✓ Model answered: {reply.strip()[:40]}[/]"
+            reply = client.chat("Reply with exactly: OK", "Ping")
+            who = f"{client.provider.label} · {cfg.ai_model}"
+            msg = f"[green]✓ {who} answered: {reply.strip()[:30]}[/]"
         except Exception as e:  # noqa: BLE001
             msg = f"[red]✗ {e}[/]"
         self.app.call_from_thread(out.update, msg)

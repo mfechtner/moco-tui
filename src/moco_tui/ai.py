@@ -1,7 +1,7 @@
 """AI suggestions per invoice position.
 
-Works with any OpenAI-compatible endpoint (POST {base_url}/chat/completions):
-OpenAI, Ollama (http://localhost:11434/v1), LM Studio, OpenRouter, Azure, vLLM …
+Providers: Anthropic (native Messages API), OpenAI, Google Gemini, Mistral,
+OpenRouter, Groq, Ollama, LM Studio, or any OpenAI-compatible endpoint.
 
 Per item the AI returns:
 - description  written from booked time entries, in invoice wording
@@ -45,35 +45,206 @@ class Suggestion:
         return asdict(self)
 
 
+# --------------------------------------------------------------------------- providers
+@dataclass(frozen=True)
+class Provider:
+    key: str
+    label: str
+    wire: str  # "anthropic" or "openai" (chat/completions format)
+    base_url: str
+    model_hint: str
+    needs_key: bool = True
+
+
+PROVIDERS: dict[str, Provider] = {
+    p.key: p
+    for p in [
+        Provider(
+            "anthropic",
+            "Anthropic (Claude)",
+            "anthropic",
+            "https://api.anthropic.com/v1",
+            "claude-sonnet-5-5",
+        ),
+        Provider("openai", "OpenAI", "openai", "https://api.openai.com/v1", "model name"),
+        Provider(
+            "google",
+            "Google Gemini",
+            "openai",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "model name",
+        ),
+        Provider("mistral", "Mistral", "openai", "https://api.mistral.ai/v1", "model name"),
+        Provider(
+            "openrouter", "OpenRouter", "openai", "https://openrouter.ai/api/v1", "vendor/model"
+        ),
+        Provider("groq", "Groq", "openai", "https://api.groq.com/openai/v1", "model name"),
+        Provider(
+            "ollama",
+            "Ollama (local)",
+            "openai",
+            "http://localhost:11434/v1",
+            "llama3.1",
+            needs_key=False,
+        ),
+        Provider(
+            "lmstudio",
+            "LM Studio (local)",
+            "openai",
+            "http://localhost:1234/v1",
+            "loaded model",
+            needs_key=False,
+        ),
+        Provider(
+            "custom", "Custom (OpenAI-compatible)", "openai", "", "model name", needs_key=False
+        ),
+    ]
+}
+
+
+def detect_provider(provider: str, base_url: str, model: str) -> str:
+    """Pick a provider for old settings that only have URL + model."""
+    if provider in PROVIDERS:
+        return provider
+    url, m = (base_url or "").lower(), (model or "").lower()
+    if "anthropic.com" in url or (m.startswith("claude") and not url):
+        return "anthropic"
+    for p in PROVIDERS.values():
+        if p.base_url and url.startswith(p.base_url.lower()):
+            return p.key
+    if m.startswith("claude") and "openrouter" not in url:
+        return "anthropic"
+    return "custom" if url else ""
+
+
 # --------------------------------------------------------------------------- client
 class AIClient:
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 120):
-        self.url = base_url.rstrip("/") + "/chat/completions"
+    """One client for all providers. No temperature is sent: newer models reject it."""
+
+    MAX_TOKENS = 4096
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: int = 120,
+        provider: str = "",
+    ):
+        self.provider = (
+            PROVIDERS.get(detect_provider(provider, base_url, model)) or PROVIDERS["custom"]
+        )
+        self.base = (base_url or self.provider.base_url).rstrip("/")
+        if not self.base:
+            raise AIError("No endpoint URL set.")
+        if self.provider.needs_key and not api_key:
+            raise AIError(f"{self.provider.label} needs an API key.")
+        self.api_key = api_key
         self.model = model
         self.timeout = timeout
-        self.headers = {"Content-Type": "application/json"}
-        if api_key:
-            self.headers["Authorization"] = f"Bearer {api_key}"
 
+    # ---- public
     def chat(self, system: str, user: str) -> str:
+        if self.provider.wire == "anthropic":
+            return self._anthropic(system, user)
+        return self._openai(system, user)
+
+    # ---- wire formats
+    def _anthropic(self, system: str, user: str) -> str:
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
         body = {
             "model": self.model,
-            "temperature": 0.2,
+            "max_tokens": self.MAX_TOKENS,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+        data = self._post(self.base + "/messages", headers, body)
+        try:
+            return "".join(b.get("text", "") for b in data["content"] if b.get("type") == "text")
+        except (KeyError, TypeError) as e:
+            raise AIError(f"Unexpected Anthropic response: {str(data)[:300]}") from e
+
+    def _openai(self, system: str, user: str) -> str:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        body = {
+            "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
         }
+        data = self._post(self.base + "/chat/completions", headers, body)
         try:
-            r = requests.post(self.url, json=body, headers=self.headers, timeout=self.timeout)
-        except requests.RequestException as e:
-            raise AIError(f"AI endpoint not reachable: {e}") from e
-        if r.status_code >= 400:
-            raise AIError(f"AI endpoint {r.status_code}: {r.text[:300]}")
-        try:
-            return r.json()["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, ValueError) as e:
-            raise AIError(f"Unexpected AI response: {r.text[:300]}") from e
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise AIError(f"Unexpected AI response: {str(data)[:300]}") from e
+        if isinstance(content, list):  # some providers return content parts
+            content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+        return content or ""
+
+    def _post(self, url: str, headers: dict, body: dict) -> dict:
+        """POST; if the provider rejects an optional parameter, retry once without it."""
+        for _ in range(3):
+            try:
+                r = requests.post(url, json=body, headers=headers, timeout=self.timeout)
+            except requests.RequestException as e:
+                raise AIError(f"{self.provider.label} not reachable: {e}") from e
+            if r.status_code < 400:
+                try:
+                    return r.json()
+                except ValueError as e:
+                    raise AIError(f"Invalid JSON from {self.provider.label}") from e
+            bad = rejected_param(r.text, body)
+            if r.status_code == 400 and bad:
+                body = {k: v for k, v in body.items() if k != bad}
+                continue
+            raise AIError(f"{self.provider.label} {r.status_code}: {error_text(r)}")
+        raise AIError(f"{self.provider.label}: request rejected")
+
+
+OPTIONAL_PARAMS = ("temperature", "top_p", "max_tokens", "max_completion_tokens")
+
+
+def rejected_param(text: str, body: dict) -> str | None:
+    t = (text or "").lower()
+    for p in OPTIONAL_PARAMS:
+        if (
+            p in body
+            and p in t
+            and (
+                "unsupported" in t
+                or "not supported" in t
+                or "deprecated" in t
+                or "invalid" in t
+                or "not allowed" in t
+                or "does not support" in t
+            )
+        ):
+            # never drop max_tokens for Anthropic (required there)
+            if p == "max_tokens" and "anthropic-version" in t:
+                return None
+            return p
+    return None
+
+
+def error_text(r: requests.Response) -> str:
+    """Short, readable provider error."""
+    try:
+        d = r.json()
+        err = d.get("error", d)
+        if isinstance(err, dict):
+            return str(err.get("message") or err)[:300]
+        if isinstance(d, list) and d:  # Gemini sometimes returns a list
+            return str(d[0].get("error", {}).get("message", d[0]))[:300]
+        return str(err)[:300]
+    except ValueError:
+        return r.text[:300]
 
 
 def parse_json(text: str) -> dict:

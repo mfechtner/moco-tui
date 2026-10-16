@@ -120,8 +120,13 @@ class Service:
     # ---- AI ----
     def ai_client(self) -> ai.AIClient:
         if not self.cfg.ai_ready:
-            raise ai.AIError("AI not configured. Set endpoint + model in settings (s).")
-        return ai.AIClient(self.cfg.ai_base_url, self.cfg.ai_api_key, self.cfg.ai_model)
+            raise ai.AIError("AI not configured. Pick provider + model in settings (s).")
+        return ai.AIClient(
+            self.cfg.ai_base_url,
+            self.cfg.ai_api_key,
+            self.cfg.ai_model,
+            provider=self.cfg.ai_provider,
+        )
 
     def activities_for(self, offer: dict) -> list[dict]:
         """Billable time entries of the offer's project, from offer date (or lookback) to today."""

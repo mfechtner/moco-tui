@@ -55,7 +55,8 @@ class Settings:
     mark_offer_billed: bool = False
     title_prefix: str = "Rechnung"
     tag_prefix: str = "Angebot"
-    # AI (OpenAI-compatible endpoint)
+    # AI
+    ai_provider: str = ""  # key of ai.PROVIDERS, "" = auto-detect
     ai_base_url: str = ""
     ai_api_key: str = ""
     ai_model: str = ""
@@ -64,7 +65,10 @@ class Settings:
 
     @property
     def ai_ready(self) -> bool:
-        return bool(self.ai_base_url and self.ai_model)
+        from moco_tui.ai import PROVIDERS, detect_provider
+
+        p = PROVIDERS.get(detect_provider(self.ai_provider, self.ai_base_url, self.ai_model))
+        return bool(self.ai_model and p and (self.ai_base_url or p.base_url))
 
     @property
     def complete(self) -> bool:
@@ -103,6 +107,7 @@ class Store:
         # env vars win (handy for CI / cron)
         s.domain = os.environ.get("MOCO_DOMAIN", s.domain)
         s.api_key = os.environ.get("MOCO_API_KEY", s.api_key)
+        s.ai_provider = os.environ.get("MOCO_TUI_AI_PROVIDER", s.ai_provider)
         s.ai_base_url = os.environ.get("MOCO_TUI_AI_BASE_URL", s.ai_base_url)
         s.ai_api_key = os.environ.get("MOCO_TUI_AI_API_KEY", s.ai_api_key)
         s.ai_model = os.environ.get("MOCO_TUI_AI_MODEL", s.ai_model)

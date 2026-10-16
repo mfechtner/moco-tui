@@ -94,3 +94,94 @@ def test_client_sends_openai_format(monkeypatch):
     assert sent["url"] == "http://localhost:11434/v1/chat/completions"
     assert sent["json"]["model"] == "llama3.1"
     assert "Authorization" not in sent["headers"]  # no key for local models
+
+
+# ---------------------------------------------------------------- providers
+class Resp:
+    def __init__(self, status, data):
+        self.status_code, self._data = status, data
+        self.text = data if isinstance(data, str) else json.dumps(data)
+
+    def json(self):
+        if isinstance(self._data, str):
+            raise ValueError
+        return self._data
+
+
+def record(monkeypatch, *responses):
+    sent = []
+    queue = list(responses)
+
+    def post(url, json, headers, timeout):
+        sent.append({"url": url, "json": json, "headers": headers})
+        return queue.pop(0)
+
+    monkeypatch.setattr(ai.requests, "post", post)
+    return sent
+
+
+def test_anthropic_native(monkeypatch):
+    sent = record(monkeypatch, Resp(200, {"content": [{"type": "text", "text": "OK"}]}))
+    out = ai.AIClient("", "sk-ant", "claude-sonnet-5-5", provider="anthropic").chat("sys", "hi")
+    assert out == "OK"
+    req = sent[0]
+    assert req["url"] == "https://api.anthropic.com/v1/messages"
+    assert req["headers"]["x-api-key"] == "sk-ant"
+    assert req["headers"]["anthropic-version"] == "2023-06-01"
+    assert req["json"]["system"] == "sys"
+    assert req["json"]["max_tokens"] > 0
+    assert "temperature" not in req["json"]
+
+
+def test_no_temperature_anywhere(monkeypatch):
+    sent = record(monkeypatch, Resp(200, {"choices": [{"message": {"content": "OK"}}]}))
+    ai.AIClient("", "sk", "some-model", provider="openai").chat("s", "u")
+    assert "temperature" not in sent[0]["json"]
+    assert sent[0]["url"] == "https://api.openai.com/v1/chat/completions"
+
+
+def test_retries_without_rejected_param(monkeypatch):
+    sent = record(
+        monkeypatch,
+        Resp(400, {"error": {"message": "Unsupported parameter: 'top_p' is not supported"}}),
+        Resp(200, {"choices": [{"message": {"content": "OK"}}]}),
+    )
+    c = ai.AIClient("", "sk", "m", provider="openai")
+    data = c._post("https://x/chat/completions", {}, {"model": "m", "top_p": 0.5})
+    assert data["choices"][0]["message"]["content"] == "OK"
+    assert "top_p" in sent[0]["json"] and "top_p" not in sent[1]["json"]
+
+
+def test_readable_error(monkeypatch):
+    record(monkeypatch, Resp(401, {"error": {"type": "auth", "message": "invalid x-api-key"}}))
+    with pytest.raises(ai.AIError, match="Anthropic \\(Claude\\) 401: invalid x-api-key"):
+        ai.AIClient("", "bad", "claude-sonnet-5-5", provider="anthropic").chat("s", "u")
+
+
+def test_key_required_for_cloud():
+    with pytest.raises(ai.AIError, match="needs an API key"):
+        ai.AIClient("", "", "claude-sonnet-5-5", provider="anthropic")
+
+
+@pytest.mark.parametrize(
+    "provider,url,model,expected",
+    [
+        ("", "https://api.anthropic.com/v1", "claude-sonnet-5-5", "anthropic"),
+        ("", "https://api.anthropic.com/v1/", "claude-sonnet-5-5", "anthropic"),
+        ("", "", "claude-sonnet-5-5", "anthropic"),
+        ("", "https://openrouter.ai/api/v1", "anthropic/claude-sonnet-5-5", "openrouter"),
+        ("", "http://localhost:11434/v1", "llama3.1", "ollama"),
+        ("", "https://my.proxy/v1", "x", "custom"),
+        ("google", "", "x", "google"),
+    ],
+)
+def test_detect_provider(provider, url, model, expected):
+    assert ai.detect_provider(provider, url, model) == expected
+
+
+def test_settings_ai_ready_with_provider_default():
+    from moco_tui.store import Settings
+
+    assert Settings(ai_provider="anthropic", ai_model="claude-sonnet-5-5").ai_ready
+    assert not Settings(ai_provider="anthropic").ai_ready
+    assert not Settings(ai_provider="custom", ai_model="m").ai_ready  # custom needs URL
