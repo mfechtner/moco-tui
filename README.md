@@ -29,6 +29,7 @@ First start opens a setup screen. You need:
 | `g`     | AI suggestions for the offer    |
 | `/`     | Filter by no., customer, title  |
 | `o`     | Open offer in MOCO              |
+| `t`     | Change offer status             |
 | `i`     | Invoices (list, details, edit drafts) |
 | `h`     | History of created drafts       |
 | `s`     | Settings                        |
@@ -56,6 +57,24 @@ First start opens a setup screen. You need:
 - List by status: draft, created, sent, overdue, partially paid, paid, ignored
 - `enter` → details: overview, items, texts, payments
 - `e` → **edit a draft**
+
+### Actions
+
+| Key | Offers (in details)        | Invoices (in details)                         |
+| --- | -------------------------- | --------------------------------------------- |
+| `t` | Status: created · sent · accepted · partially billed · billed · archived | Status: created · sent · overdue · ignored (not drafts) |
+| `m` | Send by email              | Send by email (not drafts)                    |
+| `p` | Download PDF               | Download PDF                                  |
+| `P` | –                          | Download timesheet PDF                        |
+| `b` | –                          | Record payment (default: open amount)         |
+| `r` | –                          | Create payment reminder                       |
+| `x` | –                          | Delete (draft: confirm · final: reason required) |
+| `e` | –                          | Edit draft                                    |
+
+- Email: empty "To" = default recipients set in MOCO
+- PDFs go to your Downloads folder, never overwriting
+- "paid" is set by MOCO when payments cover the total
+- Keys that don't apply are hidden
 
 ### Edit a draft
 
@@ -141,6 +160,10 @@ Runs a local stdio MCP server. Same settings + SQLite as the TUI.
 | `suggest_items`        | Use the configured AI endpoint                     |
 | `create_invoice_draft` | Dry run by default; creates a **draft** only       |
 | `draft_history`        | Drafts created so far                              |
+| `list_invoices` / `get_invoice` | Invoices by status / full invoice      |
+| `set_offer_status` / `set_invoice_status` | Change status                |
+| `send_offer_email` / `send_invoice_email` | Send by email                |
+| `record_payment` / `create_reminder` | Payments and reminders            |
 
 The MCP client's own model can write the texts (`get_time_entries` → `set_item_texts`).
 No AI endpoint needed for that.

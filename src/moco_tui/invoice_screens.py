@@ -25,6 +25,15 @@ from textual.widgets import (
     TextArea,
 )
 
+from moco_tui.dialogs import (
+    INVOICE_STATUSES_SETTABLE,
+    EmailDialog,
+    PaymentDialog,
+    ReminderDialog,
+    StatusPicker,
+    TextPrompt,
+    save_pdf,
+)
 from moco_tui.invoices import (
     INVOICE_STATUSES,
     ITEM_TYPES,
@@ -233,8 +242,26 @@ class InvoiceScreen(Screen[bool]):
         Binding("1", "tab('i_over')", "Overview"),
         Binding("2", "tab('i_items')", "Items"),
         Binding("e", "edit", "Edit draft"),
+        Binding("t", "status", "Status"),
+        Binding("m", "email", "Email"),
+        Binding("b", "payment", "Payment"),
+        Binding("r", "reminder", "Reminder"),
+        Binding("p", "pdf", "PDF"),
+        Binding("P", "timesheet_pdf", "Timesheet PDF"),
+        Binding("x", "delete", "Delete"),
         Binding("o", "open", "Open in MOCO"),
     ]
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """Hide keys that don't apply to this invoice."""
+        if not self.inv:
+            return action in ("back", "tab", "open")
+        draft = self.inv.get("status") == "draft"
+        if action == "edit":
+            return draft
+        if action in ("status", "payment", "reminder", "timesheet_pdf"):
+            return not draft
+        return True
 
     def __init__(self, invoice_id: int, svc: InvoiceService):
         super().__init__()
@@ -272,14 +299,19 @@ class InvoiceScreen(Screen[bool]):
             return
         self.inv, self.edit_ok = inv, edit
         self.app.call_from_thread(self.render_invoice)
+        self.app.call_from_thread(self.refresh_bindings)
 
     def render_invoice(self) -> None:
         inv, cur = self.inv, self.inv.get("currency")
-        hint = (
-            "[green]e = edit draft[/]"
-            if self.edit_ok.ok
-            else f"[dim]read-only: {esc(self.edit_ok.reason)}[/dim]"
-        )
+        if inv.get("status") == "draft":
+            hint = (
+                "[green]e = edit draft[/]"
+                if self.edit_ok.ok
+                else f"[dim]read-only: {esc(self.edit_ok.reason)}[/dim]"
+            )
+        else:
+            left = self.open_amount()
+            hint = f"[b]open {money(left, cur)}[/b]" if left > 0 else "[green]fully paid[/]"
         self.query_one("#i_head", Static).update(
             f"[b]{esc(inv.get('identifier') or 'Draft')}[/b]  {esc(inv.get('title'))}   "
             f"{status_cell(inv.get('status'))}   {hint}"
@@ -312,6 +344,13 @@ class InvoiceScreen(Screen[bool]):
             lines += ["", "[b u]Intro text[/]", esc(plain(inv["salutation"]))]
         if inv.get("footer"):
             lines += ["", "[b u]Footer text[/]", esc(plain(inv["footer"]))]
+        reminders = inv.get("reminders") or []
+        if reminders:
+            lines += ["", "[b u]Reminders[/]"]
+            lines += [
+                f"{r.get('date')}  pay by {r.get('due_date')}  fee {money(r.get('fee'), cur)}"
+                for r in reminders
+            ]
         payments = inv.get("payments") or []
         if payments:
             lines += ["", "[b u]Payments[/]"]
@@ -334,6 +373,101 @@ class InvoiceScreen(Screen[bool]):
 
     def action_open(self) -> None:
         webbrowser.open(self.svc.web_url(self.iid))
+
+    # ---- actions
+    def open_amount(self) -> float:
+        inv = self.inv or {}
+        gross = float(inv.get("gross_total") or inv.get("net_total") or 0)
+        paid = sum(float(p.get("paid_total") or 0) for p in inv.get("payments") or [])
+        return max(round(gross - paid, 2), 0.0)
+
+    def action_status(self) -> None:
+        cur = self.inv.get("status")
+        self.app.push_screen(
+            StatusPicker("Invoice status", cur, INVOICE_STATUSES_SETTABLE),
+            lambda st: st and st != cur and self.run_action("status", st),
+        )
+
+    def action_email(self) -> None:
+        subject = f"Rechnung {self.inv.get('identifier') or ''} – {self.inv.get('title') or ''}"
+        if self.inv.get("status") == "draft":
+            self.notify("Drafts can't be sent. Finalize it in MOCO first.", severity="warning")
+            return
+        self.app.push_screen(
+            EmailDialog("invoice", subject), lambda m: m and self.run_action("email", m)
+        )
+
+    def action_payment(self) -> None:
+        self.app.push_screen(
+            PaymentDialog(self.open_amount(), self.inv.get("currency")),
+            lambda p: p and self.run_action("payment", p),
+        )
+
+    def action_reminder(self) -> None:
+        self.app.push_screen(ReminderDialog(), lambda r: r and self.run_action("reminder", r))
+
+    def action_pdf(self) -> None:
+        self.notify("Downloading PDF …")
+        self.run_action("pdf", None)
+
+    def action_timesheet_pdf(self) -> None:
+        self.notify("Downloading timesheet …")
+        self.run_action("timesheet", None)
+
+    def action_delete(self) -> None:
+        if self.inv.get("status") == "draft":
+            self.app.push_screen(
+                ConfirmBox("Delete this draft in MOCO?"),
+                lambda ok: ok and self.run_action("delete", None),
+            )
+        else:
+            self.app.push_screen(
+                TextPrompt(
+                    "Delete final invoice",
+                    "MOCO requires a reason. Usually a reversal is the better way.",
+                    "Delete",
+                ),
+                lambda reason: reason and self.run_action("delete", reason),
+            )
+
+    @work(thread=True, group="invoice_action")
+    def run_action(self, kind: str, arg) -> None:
+        api, inv = self.svc.api, self.inv or {}
+        name = f"Rechnung_{inv.get('identifier') or 'Entwurf_' + str(self.iid)}"
+        try:
+            if kind == "status":
+                api.set_invoice_status(self.iid, arg)
+                msg = f"Status → {arg}"
+            elif kind == "email":
+                res = api.send_invoice_email(self.iid, **arg)
+                to = res.get("emails_to") if isinstance(res, dict) else None
+                msg = f"Email sent{' to ' + str(to) if to else ''}."
+            elif kind == "payment":
+                api.create_payment(self.iid, arg["date"], arg["paid_total"], arg["description"])
+                msg = f"Payment {money(arg['paid_total'], inv.get('currency'))} recorded."
+            elif kind == "reminder":
+                api.create_reminder(self.iid, **arg)
+                msg = "Reminder created."
+            elif kind == "pdf":
+                msg = f"PDF saved: {save_pdf(api.invoice_pdf(self.iid), name)}"
+            elif kind == "timesheet":
+                path = save_pdf(api.invoice_timesheet_pdf(self.iid), name + "_Zeiten")
+                msg = f"Timesheet saved: {path}"
+            elif kind == "delete":
+                api.delete_invoice(self.iid, reason=arg)
+                self.changed = True
+                self.app.call_from_thread(self.notify, "Invoice deleted.")
+                self.app.call_from_thread(self.dismiss, True)
+                return
+            else:
+                return
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self.notify, f"{kind} failed: {e}", severity="error")
+            return
+        self.app.call_from_thread(self.notify, msg, timeout=8)
+        if kind in ("status", "payment", "reminder"):
+            self.changed = True
+            self.load()
 
     def action_back(self) -> None:
         self.dismiss(self.changed)

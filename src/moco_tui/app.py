@@ -27,6 +27,7 @@ from textual.widgets import (
 
 from moco_tui import __version__, ai
 from moco_tui.api import Moco
+from moco_tui.dialogs import OFFER_STATUSES, EmailDialog, StatusPicker, save_pdf
 from moco_tui.invoice_screens import InvoicesScreen
 from moco_tui.invoices import InvoiceService
 from moco_tui.service import HAS_DRAFT, INVOICED, NO_CUSTOMER, READY, Service, build_invoice
@@ -475,12 +476,16 @@ class OfferScreen(Screen[str | None]):
         Binding("4", "tab('t_draft')", "Draft"),
         Binding("g", "ai", "AI"),
         Binding("c", "create", "Create draft"),
+        Binding("t", "status", "Status"),
+        Binding("m", "email", "Email"),
+        Binding("p", "pdf", "PDF"),
         Binding("o", "open", "Open in MOCO"),
     ]
 
     def __init__(self, offer_id: int, state: str, svc: Service, store: Store, cached=None):
         super().__init__()
         self.oid, self.state_key, self.svc, self.store = offer_id, state, svc, store
+        self.changed = False
         self.offer = cached
 
     def compose(self) -> ComposeResult:
@@ -674,10 +679,56 @@ class OfferScreen(Screen[str | None]):
         self.query_one(TabbedContent).active = tab
 
     def action_back(self) -> None:
-        self.dismiss(None)
+        self.dismiss("reload" if self.changed else None)
 
     def action_ai(self) -> None:
         self.dismiss("ai")
+
+    # ---- status / email / pdf
+    def action_status(self) -> None:
+        if not self.offer:
+            return
+        self.app.push_screen(
+            StatusPicker("Offer status", self.offer.get("status"), OFFER_STATUSES),
+            lambda st: st and st != self.offer.get("status") and self.run_action("status", st),
+        )
+
+    def action_email(self) -> None:
+        if not self.offer:
+            return
+        subject = f"Angebot {self.offer.get('identifier')} – {self.offer.get('title') or ''}"
+        self.app.push_screen(
+            EmailDialog("offer", subject), lambda m: m and self.run_action("email", m)
+        )
+
+    def action_pdf(self) -> None:
+        self.notify("Downloading PDF …")
+        self.run_action("pdf", None)
+
+    @work(thread=True, group="offer_action")
+    def run_action(self, kind: str, arg) -> None:
+        api, o = self.svc.api, self.offer or {}
+        try:
+            if kind == "status":
+                api.set_offer_status(self.oid, arg)
+                o["status"] = arg
+                self.changed = True
+                msg = f"Status → {arg}"
+            elif kind == "email":
+                res = api.send_offer_email(self.oid, **arg)
+                to = res.get("emails_to") if isinstance(res, dict) else None
+                msg = f"Email sent{' to ' + str(to) if to else ''}."
+            else:
+                path = save_pdf(
+                    api.offer_pdf(self.oid), f"Angebot_{o.get('identifier') or self.oid}"
+                )
+                msg = f"PDF saved: {path}"
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self.notify, f"{kind} failed: {e}", severity="error")
+            return
+        self.app.call_from_thread(self.notify, msg, timeout=8)
+        if kind == "status":
+            self.app.call_from_thread(self.render_offer)
 
     def action_create(self) -> None:
         if self.state_key != READY:
@@ -727,7 +778,14 @@ class MocoApp(App):
     .form { padding: 0 2; }
     .form Label { padding-top: 1; }
     .form TextArea { height: 6; }
-    ItemEditor, ConfirmBox { align: center middle; }
+    ItemEditor, ConfirmBox, StatusPicker, EmailDialog, PaymentDialog, ReminderDialog,
+    TextPrompt { align: center middle; }
+    StatusPicker .dialog, PaymentDialog .dialog, TextPrompt .dialog {
+        height: auto; max-height: 90%;
+    }
+    EmailDialog .dialog, ReminderDialog .dialog { height: 90%; }
+    #m_text, #r_text { height: 7; }
+    .col { height: auto; width: 1fr; margin-right: 1; }
     .item-editor { height: 90%; }
     .item-editor TextArea { height: 6; }
     .item-editor Label { padding-top: 1; }
@@ -755,6 +813,7 @@ class MocoApp(App):
         Binding("enter", "details", "Details", show=True),
         Binding("o", "open", "Open"),
         Binding("slash", "filter", "Filter"),
+        Binding("t", "offer_status", "Status"),
         Binding("i", "invoices", "Invoices"),
         Binding("h", "history", "History"),
         Binding("s", "settings", "Settings"),
@@ -764,6 +823,7 @@ class MocoApp(App):
 
     MAIN_ONLY = {
         "details",
+        "offer_status",
         "invoices",
         "toggle",
         "select_ready",
@@ -998,7 +1058,9 @@ class MocoApp(App):
             self.query_one("#offers", DataTable).focus()
             if oid in self.details:
                 self.show_preview(oid)
-            if result == "ai":
+            if result == "reload":
+                self.action_reload()
+            elif result == "ai":
                 self.action_ai()
             elif result == "create":
                 self.selected = {oid}
@@ -1171,6 +1233,29 @@ class MocoApp(App):
             self.query_one("#offers", DataTable).focus()
 
         self.push_screen(AIReviewScreen(offer, sugg), done)
+
+    def action_offer_status(self) -> None:
+        oid = self.current_id()
+        if oid is None or not self.svc:
+            return
+        cur = self.offers[oid].get("status")
+
+        def done(st: str | None) -> None:
+            if st and st != cur:
+                self.set_offer_status(oid, st)
+
+        self.push_screen(StatusPicker("Offer status", cur, OFFER_STATUSES), done)
+
+    @work(thread=True, group="offer_action")
+    def set_offer_status(self, oid: int, status: str) -> None:
+        label = self.offers[oid].get("identifier")
+        try:
+            self.svc.api.set_offer_status(oid, status)
+        except Exception as e:  # noqa: BLE001
+            self.call_from_thread(self.log_msg, f"[red]FAIL[/] {label}: status: {e}")
+            return
+        self.call_from_thread(self.log_msg, f"[green]OK[/]   {label}: status → {status}")
+        self.call_from_thread(self.action_reload)
 
     def action_invoices(self) -> None:
         if self.svc:

@@ -16,6 +16,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from moco_tui import __version__, ai
 from moco_tui.api import Moco
+from moco_tui.dialogs import INVOICE_STATUSES_SETTABLE, OFFER_STATUSES
 from moco_tui.service import READY, Service, build_invoice
 from moco_tui.store import Store
 
@@ -26,7 +27,11 @@ Typical flow:
 3. set_item_texts -> write invoice titles/descriptions per item (or suggest_items)
 4. create_invoice_draft with dry_run=true -> check payload
 5. create_invoice_draft with dry_run=false -> creates a DRAFT in MOCO (never a final invoice)
-Ask the user before step 5."""
+Ask the user before step 5.
+
+Also available: list_invoices, get_invoice, set_offer_status, set_invoice_status,
+send_offer_email, send_invoice_email, record_payment, create_reminder.
+These change real data or email customers: always confirm with the user first."""
 
 
 def build_server(store: Store | None = None, api: Moco | None = None) -> MCPServer:
@@ -149,6 +154,97 @@ def build_server(store: Store | None = None, api: Moco | None = None) -> MCPServ
         if dry_run:
             return {"dry_run": True, "payload": res}
         return {"created": True, "invoice_id": res["id"], "url": s.web_url("invoices", res["id"])}
+
+    # ---- invoices
+    @server.tool()
+    def list_invoices(status: str = "draft") -> list[dict]:
+        """Invoices by status: draft, created, sent, overdue, partially_paid, paid, ignored."""
+        return [
+            {
+                "id": i["id"],
+                "identifier": i.get("identifier"),
+                "title": i.get("title"),
+                "customer": (i.get("customer") or {}).get("name"),
+                "date": i.get("date"),
+                "due_date": i.get("due_date"),
+                "status": i.get("status"),
+                "net_total": i.get("net_total"),
+                "gross_total": i.get("gross_total"),
+                "currency": i.get("currency"),
+            }
+            for i in svc().api.invoices(status)
+        ]
+
+    @server.tool()
+    def get_invoice(invoice_id: int) -> dict:
+        """Full invoice incl. items, payments and reminders."""
+        inv = svc().api.invoice(invoice_id)
+        inv = dict(inv)
+        for k in ("salutation", "footer"):
+            inv[k] = ai.strip_html(inv.get(k))
+        inv["items"] = [
+            dict(it, description=ai.strip_html(it.get("description")))
+            for it in inv.get("items", [])
+        ]
+        return inv
+
+    # ---- status
+    @server.tool()
+    def set_offer_status(offer_id: int, status: str) -> dict:
+        """Status: created, sent, accepted, partially_billed, billed, archived."""
+        if status not in OFFER_STATUSES:
+            raise ToolError(f"status must be one of {OFFER_STATUSES}")
+        svc().api.set_offer_status(offer_id, status)
+        return {"offer_id": offer_id, "status": status}
+
+    @server.tool()
+    def set_invoice_status(invoice_id: int, status: str) -> dict:
+        """Status: created, sent, overdue, ignored. Not for drafts. 'paid' comes from payments."""
+        if status not in INVOICE_STATUSES_SETTABLE:
+            raise ToolError(f"status must be one of {INVOICE_STATUSES_SETTABLE}")
+        svc().api.set_invoice_status(invoice_id, status)
+        return {"invoice_id": invoice_id, "status": status}
+
+    # ---- email
+    @server.tool()
+    def send_offer_email(
+        offer_id: int, subject: str, text: str, emails_to: str = "", emails_cc: str = ""
+    ) -> dict:
+        """Email the offer PDF. Empty emails_to = default recipients in MOCO. Several: a@x;b@y"""
+        return svc().api.send_offer_email(
+            offer_id, subject=subject, text=text, emails_to=emails_to, emails_cc=emails_cc
+        )
+
+    @server.tool()
+    def send_invoice_email(
+        invoice_id: int, subject: str, text: str, emails_to: str = "", emails_cc: str = ""
+    ) -> dict:
+        """Email the invoice PDF (not for drafts). Empty emails_to = MOCO default recipients."""
+        return svc().api.send_invoice_email(
+            invoice_id, subject=subject, text=text, emails_to=emails_to, emails_cc=emails_cc
+        )
+
+    # ---- payments / reminders
+    @server.tool()
+    def record_payment(
+        invoice_id: int, date: str, paid_total: float, description: str = ""
+    ) -> dict:
+        """Record a received payment (date YYYY-MM-DD)."""
+        return svc().api.create_payment(invoice_id, date, paid_total, description)
+
+    @server.tool()
+    def create_reminder(
+        invoice_id: int,
+        date: str = "",
+        due_date: str = "",
+        fee: float = 0,
+        title: str = "",
+        text: str = "",
+    ) -> dict:
+        """Create a payment reminder. Empty title/text = MOCO defaults."""
+        return svc().api.create_reminder(
+            invoice_id, date=date, due_date=due_date, fee=fee or None, title=title, text=text
+        )
 
     @server.tool()
     def draft_history(limit: int = 20) -> list[dict]:

@@ -72,11 +72,52 @@ class Moco:
     def invoice_timesheet(self, invoice_id: int) -> list[dict]:
         return self.call("GET", f"/invoices/{invoice_id}/timesheet").json()
 
-    def delete_invoice(self, invoice_id: int) -> None:
-        self.call("DELETE", f"/invoices/{invoice_id}")
+    def delete_invoice(self, invoice_id: int, reason: str | None = None) -> None:
+        """Drafts: no reason needed. Final invoices: MOCO requires a reason."""
+        self.call("DELETE", f"/invoices/{invoice_id}", json={"reason": reason} if reason else None)
 
     def create_invoice(self, payload: dict) -> dict:
         return self.call("POST", "/invoices", json=payload).json()
 
     def set_offer_status(self, offer_id: int, status: str) -> None:
         self.call("PUT", f"/offers/{offer_id}/update_status", json={"status": status})
+
+    # ---- offer actions
+    def send_offer_email(self, offer_id: int, **mail) -> dict:
+        """mail: subject, text, emails_to, emails_cc, emails_bcc (empty -> MOCO defaults)."""
+        return self.call("POST", f"/offers/{offer_id}/send_email", json=clean(mail)).json()
+
+    def offer_pdf(self, offer_id: int) -> bytes:
+        return self.call("GET", f"/offers/{offer_id}.pdf").content
+
+    # ---- invoice actions
+    def set_invoice_status(self, invoice_id: int, status: str) -> None:
+        """created, sent, overdue, ignored. Not possible for drafts."""
+        self.call("PUT", f"/invoices/{invoice_id}/update_status", json={"status": status})
+
+    def send_invoice_email(self, invoice_id: int, **mail) -> dict:
+        return self.call("POST", f"/invoices/{invoice_id}/send_email", json=clean(mail)).json()
+
+    def invoice_pdf(self, invoice_id: int) -> bytes:
+        return self.call("GET", f"/invoices/{invoice_id}.pdf").content
+
+    def invoice_timesheet_pdf(self, invoice_id: int) -> bytes:
+        return self.call("GET", f"/invoices/{invoice_id}/timesheet.pdf").content
+
+    def create_payment(
+        self, invoice_id: int, date: str, paid_total: float, description: str = ""
+    ) -> dict:
+        body = {"invoice_id": invoice_id, "date": date, "paid_total": paid_total}
+        if description:
+            body["description"] = description
+        return self.call("POST", "/invoices/payments", json=body).json()
+
+    def create_reminder(self, invoice_id: int, **fields) -> dict:
+        """fields: title, text, fee, date, due_date (empty -> MOCO defaults)."""
+        body = {"invoice_id": invoice_id, **clean(fields)}
+        return self.call("POST", "/invoice_reminders", json=body).json()
+
+
+def clean(d: dict) -> dict:
+    """Drop empty values so MOCO uses its defaults."""
+    return {k: v for k, v in d.items() if v not in (None, "", [])}

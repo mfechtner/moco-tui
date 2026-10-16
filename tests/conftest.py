@@ -11,6 +11,7 @@ OFFERS = [
         "net_total": 3600,
         "currency": "EUR",
         "invoice_id": None,
+        "status": "accepted",
     },
     {
         "id": 2,
@@ -160,6 +161,8 @@ def make_invoices():
             identifier="R2610-001",
             title="Final",
             status="sent",
+            gross_total=297.5,
+            payments=[{"date": "2026-10-05", "paid_total": 97.5}],
             net_total=250,
             items=[dict(i) for i in items],
         ),
@@ -172,6 +175,8 @@ class FakeMoco:
     def __init__(self):
         self.invoices_db = make_invoices()
         self.deleted: list[int] = []
+        self.delete_reasons: list = []
+        self.actions: list[tuple] = []
         self.posted: list[dict] = []
         self.status_updates: list[tuple] = []
         self.existing_tags = {"Angebot A2610-002"}
@@ -214,8 +219,9 @@ class FakeMoco:
     def invoice_timesheet(self, invoice_id):
         return [{"id": 1, "hours": 2}] if invoice_id == 901 else []
 
-    def delete_invoice(self, invoice_id):
+    def delete_invoice(self, invoice_id, reason=None):
         self.deleted.append(invoice_id)
+        self.delete_reasons.append(reason)
         self.invoices_db.pop(invoice_id)
 
     def create_invoice(self, payload):
@@ -232,6 +238,39 @@ class FakeMoco:
 
     def set_offer_status(self, offer_id, status):
         self.status_updates.append((offer_id, status))
+
+    # ---- actions
+    def set_invoice_status(self, invoice_id, status):
+        self.actions.append(("invoice_status", invoice_id, status))
+        self.invoices_db[invoice_id]["status"] = status
+
+    def send_offer_email(self, offer_id, **mail):
+        self.actions.append(("offer_email", offer_id, mail))
+        return {"emails_to": mail.get("emails_to") or "default@acme.test"}
+
+    def send_invoice_email(self, invoice_id, **mail):
+        self.actions.append(("invoice_email", invoice_id, mail))
+        return {"emails_to": mail.get("emails_to") or "default@acme.test"}
+
+    def offer_pdf(self, offer_id):
+        return b"%PDF-offer"
+
+    def invoice_pdf(self, invoice_id):
+        return b"%PDF-invoice"
+
+    def invoice_timesheet_pdf(self, invoice_id):
+        return b"%PDF-timesheet"
+
+    def create_payment(self, invoice_id, date, paid_total, description=""):
+        self.actions.append(("payment", invoice_id, date, paid_total))
+        self.invoices_db[invoice_id].setdefault("payments", []).append(
+            {"date": date, "paid_total": paid_total}
+        )
+        return {"id": 1}
+
+    def create_reminder(self, invoice_id, **fields):
+        self.actions.append(("reminder", invoice_id, fields))
+        return {"id": 1}
 
 
 @pytest.fixture
