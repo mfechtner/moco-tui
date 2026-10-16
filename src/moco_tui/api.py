@@ -55,6 +55,11 @@ class Moco:
     def offer(self, offer_id: int) -> dict:
         return self.call("GET", f"/offers/{offer_id}").json()
 
+    def activities(self, project_id: int, date_from: str, date_to: str) -> list[dict]:
+        return self.get_all(
+            "/activities", {"project_id": project_id, "from": date_from, "to": date_to}
+        )
+
     def invoices_with_tag(self, tag: str) -> list[dict]:
         return self.get_all("/invoices", {"tags": tag, "include_disregarded": "true"})
 

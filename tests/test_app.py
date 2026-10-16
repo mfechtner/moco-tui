@@ -78,3 +78,33 @@ async def test_history_screen(store, patched):
         await pilot.press("h")
         await pilot.pause()
         assert app.screen.query_one("#hist").row_count == 1
+
+
+async def test_ai_review_flow(store, patched, monkeypatch):
+    from conftest import FakeAI
+
+    import moco_tui.service as service_mod
+    from moco_tui.app import AIReviewScreen
+
+    monkeypatch.setattr(service_mod.ai, "AIClient", lambda *a, **k: FakeAI())
+    store.save_settings(
+        Settings(domain="acme", api_key="k", ai_base_url="http://x/v1", ai_model="m")
+    )
+    app = MocoApp(store)
+    async with app.run_test(size=(160, 45)) as pilot:
+        await wait_loaded(app, pilot)
+        await pilot.press("g")
+        for _ in range(40):
+            await pilot.pause(0.05)
+            if isinstance(app.screen, AIReviewScreen):
+                break
+        assert isinstance(app.screen, AIReviewScreen)
+        await pilot.press("u")  # use booked quantity for Design
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.2)
+        ov = store.load_overrides(1)
+        assert ov[1]["title"] == "Design umgesetzt" and ov[1]["use_quantity"]
+        await pilot.press("a", "c", "y")
+        await pilot.pause(0.4)
+        design = next(i for i in patched.posted[0]["items"] if i.get("title") == "Design umgesetzt")
+        assert design["quantity"] == 3.5

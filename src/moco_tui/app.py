@@ -20,9 +20,10 @@ from textual.widgets import (
     Select,
     Static,
     Switch,
+    TextArea,
 )
 
-from moco_tui import __version__
+from moco_tui import __version__, ai
 from moco_tui.api import Moco
 from moco_tui.service import HAS_DRAFT, INVOICED, NO_CUSTOMER, READY, Service, build_invoice
 from moco_tui.store import Settings, Store
@@ -121,6 +122,23 @@ class SettingsScreen(Screen[Settings | None]):
             with Horizontal(classes="sw"):
                 yield Switch(c.mark_offer_billed, id="mark_offer_billed")
                 yield Label("Set offer to 'billed' after draft")
+            yield Static(
+                "\n[b]AI[/b]  [dim]any OpenAI-compatible endpoint · optional[/dim]",
+                classes="section",
+            )
+            yield Label(
+                "Endpoint URL  [dim](e.g. https://api.openai.com/v1 · "
+                "http://localhost:11434/v1)[/dim]"
+            )
+            yield Input(c.ai_base_url, placeholder="https://…/v1", id="ai_base_url")
+            yield Label("API key  [dim](empty for local models)[/dim]")
+            yield Input(c.ai_api_key, password=True, id="ai_api_key")
+            yield Label("Model")
+            yield Input(c.ai_model, placeholder="gpt-4o-mini · llama3.1 · …", id="ai_model")
+            yield Label("Language of invoice texts")
+            yield Input(c.ai_language, id="ai_language")
+            yield Button("Test AI", id="test_ai")
+            yield Static("", id="test_ai_result")
             with Horizontal(classes="btns"):
                 yield Button("Save  (ctrl+s)", variant="success", id="save")
                 if not self.first_run:
@@ -139,6 +157,11 @@ class SettingsScreen(Screen[Settings | None]):
             mark_offer_billed=q("#mark_offer_billed", Switch).value,
             title_prefix=q("#title_prefix", Input).value,
             tag_prefix=q("#tag_prefix", Input).value or "Angebot",
+            ai_base_url=q("#ai_base_url", Input).value.strip(),
+            ai_api_key=q("#ai_api_key", Input).value.strip(),
+            ai_model=q("#ai_model", Input).value.strip(),
+            ai_language=q("#ai_language", Input).value.strip() or "Deutsch",
+            ai_lookback_days=self.cfg.ai_lookback_days,
         )
 
     @on(Button.Pressed, "#test")
@@ -152,6 +175,25 @@ class SettingsScreen(Screen[Settings | None]):
         try:
             p = Moco(cfg.domain, cfg.api_key).profile()
             msg = f"[green]✓ Connected as {p.get('firstname', '')} {p.get('lastname', '')}[/]"
+        except Exception as e:  # noqa: BLE001
+            msg = f"[red]✗ {e}[/]"
+        self.app.call_from_thread(out.update, msg)
+
+    @on(Button.Pressed, "#test_ai")
+    def test_ai(self) -> None:
+        self.query_one("#test_ai_result", Static).update("[dim]Asking the model …[/dim]")
+        self.run_test_ai(self.read_form())
+
+    @work(thread=True, exclusive=True, group="ai")
+    def run_test_ai(self, cfg: Settings) -> None:
+        out = self.query_one("#test_ai_result", Static)
+        try:
+            if not cfg.ai_ready:
+                raise ai.AIError("Endpoint URL and model are required.")
+            reply = ai.AIClient(cfg.ai_base_url, cfg.ai_api_key, cfg.ai_model, timeout=30).chat(
+                "Reply with exactly: OK", "Ping"
+            )
+            msg = f"[green]✓ Model answered: {reply.strip()[:40]}[/]"
         except Exception as e:  # noqa: BLE001
             msg = f"[red]✗ {e}[/]"
         self.app.call_from_thread(out.update, msg)
@@ -210,6 +252,182 @@ class HistoryScreen(Screen):
             open_url(self.svc.web_url("invoices", int(key)))
 
 
+# --------------------------------------------------------------------------- AI review
+class EditItem(ModalScreen[tuple[str, str] | None]):
+    """Edit title + description of one suggestion."""
+
+    BINDINGS = [Binding("ctrl+s", "save", "Save"), Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, title: str, description: str):
+        super().__init__()
+        self.t, self.d = title, description
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog wide"):
+            yield Label("[b]Title[/b]")
+            yield Input(self.t, id="e_title")
+            yield Label("[b]Description[/b]  [dim](one line = one bullet)[/dim]")
+            yield TextArea(self.d, id="e_desc")
+            with Horizontal(classes="btns"):
+                yield Button("Save  (ctrl+s)", variant="success", id="save")
+                yield Button("Cancel  (esc)", id="cancel")
+
+    def action_save(self) -> None:
+        self.dismiss(
+            (self.query_one("#e_title", Input).value, self.query_one("#e_desc", TextArea).text)
+        )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed)
+    def pressed(self, e: Button.Pressed) -> None:
+        self.action_save() if e.button.id == "save" else self.action_cancel()
+
+
+class AIReviewScreen(Screen):
+    """Review AI suggestions per item. Dismisses with list, 'regenerate', 'clear' or None."""
+
+    BINDINGS = [
+        Binding("space", "toggle", "Accept/skip"),
+        Binding("u", "use_qty", "Use qty"),
+        Binding("e", "edit", "Edit"),
+        Binding("g", "regenerate", "Regenerate"),
+        Binding("x", "clear", "Remove all"),
+        Binding("ctrl+s", "save", "Save"),
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, offer: dict, suggestions: list[ai.Suggestion]):
+        super().__init__()
+        self.offer = offer
+        self.sugg = suggestions
+        self.items = offer.get("items", [])
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static(
+            f"[b]AI suggestions[/b]  ·  {self.offer.get('identifier')}  "
+            f"{self.offer.get('title')}  ·  [dim]nothing is sent until you save[/dim]",
+            classes="bar",
+        )
+        with Horizontal(id="main"):
+            yield DataTable(id="sugg", cursor_type="row", zebra_stripes=True)
+            with VerticalScroll(id="preview"):
+                yield Static("", id="detail")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        t = self.query_one(DataTable)
+        t.add_column("✓", key="acc", width=2)
+        t.add_column("Item (new title)", key="title")
+        t.add_column("Offered", key="off")
+        t.add_column("Booked", key="booked")
+        t.add_column("Qty", key="qty", width=14)
+        t.add_column("Note", key="note")
+        for n, s in enumerate(self.sugg):
+            t.add_row(*self.cells(s), key=str(n))
+        t.focus()
+
+    def cells(self, s: ai.Suggestion) -> list[str]:
+        unit = s.unit or ""
+        off = f"{s.offered_quantity:g} {unit}" if s.offered_quantity is not None else "–"
+        booked = f"{s.booked_hours:g} h" if s.booked_hours is not None else "–"
+        if s.quantity is None:
+            qty = "[dim]keep[/dim]"
+        elif s.use_quantity:
+            qty = f"[b green]→ {s.quantity:g} {unit}[/]"
+        else:
+            qty = f"[dim]{s.quantity:g} (u)[/dim]"
+        warn = (
+            s.quantity is not None
+            and s.offered_quantity
+            and abs(s.quantity - float(s.offered_quantity)) > 0.01
+        )
+        note = f"[yellow]{s.note}[/]" if warn else s.note
+        return ["[b green]■[/]" if s.accepted else "□", s.title, off, booked, qty, note]
+
+    def refresh_row(self, n: int) -> None:
+        t = self.query_one(DataTable)
+        for key, val in zip(
+            ["acc", "title", "off", "booked", "qty", "note"], self.cells(self.sugg[n]), strict=True
+        ):
+            t.update_cell(str(n), key, val)
+        self.show_detail(n)
+
+    def current(self) -> int | None:
+        t = self.query_one(DataTable)
+        return t.cursor_row if t.row_count else None
+
+    @on(DataTable.RowHighlighted)
+    def highlighted(self, e: DataTable.RowHighlighted) -> None:
+        if e.row_key is not None:
+            self.show_detail(int(e.row_key.value))
+
+    def show_detail(self, n: int) -> None:
+        s = self.sugg[n]
+        orig = self.items[s.index] if s.index < len(self.items) else {}
+        old_desc = ai.strip_html(orig.get("description")) or "[dim]–[/dim]"
+        lines = [
+            "[b u]Before (offer)[/]",
+            f"[b]{orig.get('title', '')}[/b]",
+            old_desc,
+            "",
+            "[b u]After (invoice)[/]" + ("" if s.accepted else "  [red](skipped)[/]"),
+            f"[b]{s.title}[/b]",
+            s.description or "[dim]–[/dim]",
+            "",
+        ]
+        if s.booked_hours is not None:
+            lines.append(f"Booked time: [b]{s.booked_hours:g} h[/b]")
+        if s.note:
+            lines.append(f"[yellow]{s.note}[/]")
+        lines.append("\n[dim]space accept · u use qty · e edit · g regenerate[/dim]")
+        self.query_one("#detail", Static).update("\n".join(lines))
+
+    def action_toggle(self) -> None:
+        n = self.current()
+        if n is not None:
+            self.sugg[n].accepted = not self.sugg[n].accepted
+            self.refresh_row(n)
+
+    def action_use_qty(self) -> None:
+        n = self.current()
+        if n is None:
+            return
+        s = self.sugg[n]
+        if s.quantity is None:
+            self.notify("No hour-based quantity for this item.", severity="warning")
+            return
+        s.use_quantity = not s.use_quantity
+        self.refresh_row(n)
+
+    def action_edit(self) -> None:
+        n = self.current()
+        if n is None:
+            return
+
+        def done(res: tuple[str, str] | None) -> None:
+            if res:
+                self.sugg[n].title, self.sugg[n].description = res[0].strip(), res[1].strip()
+                self.sugg[n].accepted = True
+                self.refresh_row(n)
+
+        self.app.push_screen(EditItem(self.sugg[n].title, self.sugg[n].description), done)
+
+    def action_save(self) -> None:
+        self.dismiss(self.sugg)
+
+    def action_regenerate(self) -> None:
+        self.dismiss("regenerate")
+
+    def action_clear(self) -> None:
+        self.dismiss("clear")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 # --------------------------------------------------------------------------- main
 class MocoApp(App):
     TITLE = "MOCO · Offers → Invoice drafts"
@@ -236,6 +454,10 @@ class MocoApp(App):
     .dialog { width: 64; height: auto; padding: 1 2; border: thick $warning;
               background: $surface; }
     .q { width: 100%; padding-bottom: 1; }
+    EditItem { align: center middle; }
+    .wide { width: 90; }
+    #e_desc { height: 10; }
+    .section { padding-top: 1; color: $accent; }
     .btns { height: 3; margin-top: 1; }
     .btns Button { margin-right: 2; }
     """
@@ -246,6 +468,7 @@ class MocoApp(App):
         Binding("n", "select_none", "None"),
         Binding("c", "create", "Create"),
         Binding("d", "dry_run", "Dry run"),
+        Binding("g", "ai", "AI"),
         Binding("o", "open", "Open"),
         Binding("slash", "filter", "Filter"),
         Binding("h", "history", "History"),
@@ -253,6 +476,26 @@ class MocoApp(App):
         Binding("r", "reload", "Reload"),
         Binding("q", "quit", "Quit"),
     ]
+
+    MAIN_ONLY = {
+        "toggle",
+        "select_ready",
+        "select_none",
+        "create",
+        "dry_run",
+        "ai",
+        "open",
+        "filter",
+        "history",
+        "settings",
+        "reload",
+    }
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """Main-screen keys are off (and hidden) while another screen is open."""
+        if action in self.MAIN_ONLY and len(self.screen_stack) > 1:
+            return False
+        return True
 
     def __init__(self, store: Store | None = None):
         super().__init__()
@@ -470,7 +713,20 @@ class MocoApp(App):
 
     def show_preview(self, oid: int) -> None:
         o = self.details[oid]
-        inv = build_invoice(o, self.cfg)
+        ov = self.store.load_overrides(oid)
+        inv = build_invoice(o, self.cfg, overrides=ov)
+        src = o.get("items", [])
+        ai_titles = {
+            v.get("title")
+            for i, v in ov.items()
+            if v.get("accepted")
+            and i < len(src)
+            and (
+                v.get("title") != src[i].get("title")
+                or v.get("description")
+                or v.get("use_quantity")
+            )
+        }
         cur = o.get("currency")
         lines = [
             f"[b]{o.get('identifier')}[/b]  {o.get('title')}",
@@ -489,6 +745,8 @@ class MocoApp(App):
                 lines.append(f"\n[b]{it['title']}[/b]")
             elif t == "item":
                 extra = " [yellow](expense)[/]" if it.get("additional") else ""
+                if it["title"] in ai_titles:
+                    extra += " [magenta]AI[/]"
                 if "unit_price" in it:
                     lines.append(
                         f"• {it['title']}{extra}\n  [dim]{it['quantity']} {it.get('unit') or ''}"
@@ -502,7 +760,9 @@ class MocoApp(App):
         skipped = sum(1 for it in o.get("items", []) if it.get("optional"))
         if skipped and not self.cfg.include_optional:
             lines.append(f"\n[yellow]{skipped} optional item(s) left out[/yellow]")
-        lines.append("\n[dim]o = open offer in MOCO[/dim]")
+        if ov:
+            lines.append(f"\n[magenta]{len(ai_titles)} item(s) with AI text[/]")
+        lines.append("\n[dim]g = AI suggestions · o = open offer in MOCO[/dim]")
         self.query_one("#pv", Static).update("\n".join(lines))
 
     # ---- selection
@@ -539,6 +799,54 @@ class MocoApp(App):
         oid = self.current_id()
         if oid is not None and self.svc:
             open_url(self.svc.web_url("offers", oid))
+
+    def action_ai(self, regenerate: bool = False) -> None:
+        oid = self.current_id()
+        if oid is None or not self.svc:
+            return
+        stored = self.store.load_overrides(oid)
+        if stored and not regenerate:
+            sugg = [ai.Suggestion(**v) for _, v in sorted(stored.items())]
+            self.open_review(oid, sugg)
+            return
+        if not self.cfg.ai_ready:
+            self.notify("Set up AI first: press s → AI section.", severity="warning")
+            return
+        self.log_msg(f"[magenta]AI[/]   {self.offers[oid].get('identifier')}: thinking …")
+        self.run_ai(oid)
+
+    @work(thread=True, exclusive=True, group="ai")
+    def run_ai(self, oid: int) -> None:
+        label = self.offers[oid].get("identifier")
+        try:
+            sugg = self.svc.suggest(oid)
+        except Exception as e:  # noqa: BLE001
+            self.call_from_thread(self.log_msg, f"[red]AI[/]   {label}: {e}")
+            return
+        if not sugg:
+            self.call_from_thread(self.log_msg, f"[magenta]AI[/]   {label}: no items to fill")
+            return
+        self.call_from_thread(self.log_msg, f"[magenta]AI[/]   {label}: {len(sugg)} suggestion(s)")
+        self.call_from_thread(self.open_review, oid, sugg)
+
+    def open_review(self, oid: int, sugg: list[ai.Suggestion]) -> None:
+        offer = self.details.get(oid) or self.offers[oid]
+
+        def done(result) -> None:
+            if result == "regenerate":
+                self.action_ai(regenerate=True)
+            elif result == "clear":
+                self.store.clear_overrides(oid)
+                self.log_msg(f"[magenta]AI[/]   {offer.get('identifier')}: suggestions removed")
+            elif result is not None:
+                self.store.save_overrides(oid, [x.to_dict() for x in result])
+                n = sum(1 for x in result if x.accepted)
+                self.log_msg(f"[magenta]AI[/]   {offer.get('identifier')}: {n} item(s) accepted")
+            if oid in self.details and self.current_id() == oid:
+                self.show_preview(oid)
+            self.query_one("#offers", DataTable).focus()
+
+        self.push_screen(AIReviewScreen(offer, sugg), done)
 
     def action_history(self) -> None:
         if self.svc:

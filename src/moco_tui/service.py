@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from moco_tui import ai
 from moco_tui.api import Moco
 from moco_tui.store import Settings, Store
 
@@ -51,12 +52,19 @@ def tag_for(offer: dict, cfg: Settings) -> str:
     return f"{cfg.tag_prefix} {offer['identifier']}"
 
 
-def build_invoice(offer: dict, cfg: Settings, today: date | None = None) -> dict:
+def build_invoice(
+    offer: dict,
+    cfg: Settings,
+    today: date | None = None,
+    overrides: dict[int, dict] | None = None,
+) -> dict:
+    """Invoice draft payload. `overrides` = accepted AI suggestions by item index."""
     today = today or date.today()
     company = offer.get("company") or {}
     project = offer.get("project") or {}
     vat = offer.get("vat") or {}
-    items = [i for i in (map_item(x, cfg.include_optional) for x in offer.get("items", [])) if i]
+    src = ai.apply(offer.get("items", []), overrides or {})
+    items = [i for i in (map_item(x, cfg.include_optional) for x in src) if i]
     payload = {
         "status": "draft",
         "customer_id": company.get("id"),
@@ -100,7 +108,7 @@ class Service:
         offer = self.api.offer(offer_id)
         if self.check(offer) != READY:
             return None
-        payload = build_invoice(offer, self.cfg)
+        payload = build_invoice(offer, self.cfg, overrides=self.store.load_overrides(offer_id))
         if dry_run:
             return payload
         inv = self.api.create_invoice(payload)
@@ -108,3 +116,28 @@ class Service:
         if self.cfg.mark_offer_billed:
             self.api.set_offer_status(offer_id, "billed")
         return inv
+
+    # ---- AI ----
+    def ai_client(self) -> ai.AIClient:
+        if not self.cfg.ai_ready:
+            raise ai.AIError("AI not configured. Set endpoint + model in settings (s).")
+        return ai.AIClient(self.cfg.ai_base_url, self.cfg.ai_api_key, self.cfg.ai_model)
+
+    def activities_for(self, offer: dict) -> list[dict]:
+        """Billable time entries of the offer's project, from offer date (or lookback) to today."""
+        project = offer.get("project") or {}
+        if not project.get("id"):
+            return []
+        today = date.today()
+        start = offer.get("date") or (today - timedelta(days=self.cfg.ai_lookback_days)).isoformat()
+        return self.api.activities(project["id"], start, today.isoformat())
+
+    def suggest(self, offer_id: int) -> list[ai.Suggestion]:
+        offer = self.api.offer(offer_id)
+        return ai.suggest(
+            self.ai_client(),
+            offer,
+            self.activities_for(offer),
+            include_optional=self.cfg.include_optional,
+            language=self.cfg.ai_language,
+        )

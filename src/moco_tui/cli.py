@@ -3,6 +3,7 @@
 moco-tui                  open the TUI
 moco-tui run [--dry-run]  headless: create drafts for all ready offers (cron / CI)
 moco-tui where            print path of the SQLite store
+moco-tui mcp              run local MCP server (stdio) for Claude Desktop / Code
 """
 
 from __future__ import annotations
@@ -57,8 +58,14 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--dry-run", action="store_true", help="show, don't create")
     r.add_argument("--status", help="offer status (default: from settings)")
     sub.add_parser("where", help="print path of the SQLite store")
+    sub.add_parser("mcp", help="run local MCP server (stdio)")
     args = ap.parse_args(argv)
 
+    if args.cmd == "mcp":
+        from moco_tui.mcp_server import main as mcp_main
+
+        mcp_main()
+        return
     store = Store()
     if args.cmd == "where":
         print(store.path)

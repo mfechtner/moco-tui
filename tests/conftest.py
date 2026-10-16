@@ -57,6 +57,53 @@ ITEMS = [
     {"type": "item", "title": "Licence", "net_total": 400, "service_type": "expense"},
 ]
 
+ACTIVITIES = [
+    {
+        "hours": 10,
+        "description": "Wireframes",
+        "billable": True,
+        "billed": False,
+        "task": {"name": "Design"},
+    },
+    {
+        "hours": 18,
+        "description": "Screen design",
+        "billable": True,
+        "billed": False,
+        "task": {"name": "Design"},
+    },
+    {
+        "hours": 5,
+        "description": "Old work",
+        "billable": True,
+        "billed": True,
+        "task": {"name": "Design"},
+    },
+    {
+        "hours": 2,
+        "description": "Internal",
+        "billable": False,
+        "billed": False,
+        "task": {"name": "Meeting"},
+    },
+]
+
+
+class FakeAI:
+    """Stands in for ai.AIClient. Returns a fixed JSON answer."""
+
+    def __init__(self, reply: str | None = None):
+        self.calls: list[tuple[str, str]] = []
+        self.reply = reply or (
+            '```json\n{"items":[{"index":1,"title":"Design umgesetzt",'
+            '"description":"Wireframes erstellt\\nScreendesign erstellt",'
+            '"booked_hours":28,"note":""}]}\n```'
+        )
+
+    def chat(self, system, user):
+        self.calls.append((system, user))
+        return self.reply
+
 
 class FakeMoco:
     """In-memory stand-in for moco_tui.api.Moco."""
@@ -65,6 +112,7 @@ class FakeMoco:
         self.posted: list[dict] = []
         self.status_updates: list[tuple] = []
         self.existing_tags = {"Angebot A2610-002"}
+        self.activity_calls: list[tuple] = []
 
     def profile(self):
         return {"firstname": "Test", "lastname": "User"}
@@ -74,7 +122,18 @@ class FakeMoco:
 
     def offer(self, offer_id):
         o = next(o for o in OFFERS if o["id"] == offer_id)
-        return dict(o, vat={"tax": 19.0}, recipient_address="Addr", items=ITEMS)
+        return dict(
+            o,
+            vat={"tax": 19.0},
+            recipient_address="Addr",
+            items=ITEMS,
+            project={"id": 77, "name": "Relaunch"},
+            date="2026-09-01",
+        )
+
+    def activities(self, project_id, date_from, date_to):
+        self.activity_calls.append((project_id, date_from, date_to))
+        return ACTIVITIES
 
     def invoices_with_tag(self, tag):
         return [{"id": 1}] if tag in self.existing_tags else []

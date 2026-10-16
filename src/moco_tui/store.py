@@ -9,6 +9,7 @@ Override with env MOCO_TUI_DB=/path/to/file.db
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from dataclasses import asdict, dataclass, fields
@@ -34,6 +35,13 @@ CREATE TABLE IF NOT EXISTS drafts (
     currency         TEXT,
     created_at       TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ai_overrides (
+    offer_id   INTEGER NOT NULL,
+    item_index INTEGER NOT NULL,
+    data       TEXT NOT NULL,          -- JSON of ai.Suggestion
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (offer_id, item_index)
+);
 """
 
 
@@ -47,6 +55,16 @@ class Settings:
     mark_offer_billed: bool = False
     title_prefix: str = "Rechnung"
     tag_prefix: str = "Angebot"
+    # AI (OpenAI-compatible endpoint)
+    ai_base_url: str = ""
+    ai_api_key: str = ""
+    ai_model: str = ""
+    ai_language: str = "Deutsch"
+    ai_lookback_days: int = 365
+
+    @property
+    def ai_ready(self) -> bool:
+        return bool(self.ai_base_url and self.ai_model)
 
     @property
     def complete(self) -> bool:
@@ -85,6 +103,9 @@ class Store:
         # env vars win (handy for CI / cron)
         s.domain = os.environ.get("MOCO_DOMAIN", s.domain)
         s.api_key = os.environ.get("MOCO_API_KEY", s.api_key)
+        s.ai_base_url = os.environ.get("MOCO_TUI_AI_BASE_URL", s.ai_base_url)
+        s.ai_api_key = os.environ.get("MOCO_TUI_AI_API_KEY", s.ai_api_key)
+        s.ai_model = os.environ.get("MOCO_TUI_AI_MODEL", s.ai_model)
         return s
 
     def save_settings(self, s: Settings) -> None:
@@ -127,3 +148,26 @@ class Store:
         return self.con.execute(
             "SELECT * FROM drafts ORDER BY created_at DESC LIMIT ?", (limit,)
         ).fetchall()
+
+    # ---- AI overrides (accepted suggestions per offer item) ----
+    def save_overrides(self, offer_id: int, suggestions: list[dict]) -> None:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self.con:
+            self.con.execute("DELETE FROM ai_overrides WHERE offer_id = ?", (offer_id,))
+            self.con.executemany(
+                "INSERT INTO ai_overrides VALUES (?, ?, ?, ?)",
+                [
+                    (offer_id, s["index"], json.dumps(s, ensure_ascii=False), now)
+                    for s in suggestions
+                ],
+            )
+
+    def load_overrides(self, offer_id: int) -> dict[int, dict]:
+        rows = self.con.execute(
+            "SELECT item_index, data FROM ai_overrides WHERE offer_id = ?", (offer_id,)
+        ).fetchall()
+        return {r["item_index"]: json.loads(r["data"]) for r in rows}
+
+    def clear_overrides(self, offer_id: int) -> None:
+        with self.con:
+            self.con.execute("DELETE FROM ai_overrides WHERE offer_id = ?", (offer_id,))

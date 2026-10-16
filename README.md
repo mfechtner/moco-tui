@@ -25,6 +25,7 @@ First start opens a setup screen. You need:
 | `n`     | Select none                     |
 | `c`     | Create drafts                   |
 | `d`     | Toggle dry run (nothing is sent)|
+| `g`     | AI suggestions for the offer    |
 | `/`     | Filter by no., customer, title  |
 | `o`     | Open offer in MOCO              |
 | `h`     | History of created drafts       |
@@ -48,6 +49,80 @@ First start opens a setup screen. You need:
 - Optional items: left out (setting)
 - Tag `Angebot <offer no.>` → used to prevent duplicates
 
+## AI per item (optional)
+
+Press `g` on an offer. Per item the AI:
+
+- **Writes the description** from booked time entries (billable, not billed yet)
+- **Polishes the title** (offer wording → invoice wording)
+- **Checks hours vs. offer** and suggests a quantity (h or days, 8 h = 1 day)
+
+You review everything first:
+
+| Key      | Action                          |
+| -------- | ------------------------------- |
+| `space`  | Accept / skip item              |
+| `u`      | Use the suggested quantity      |
+| `e`      | Edit title + description        |
+| `g`      | Regenerate                      |
+| `x`      | Remove all suggestions          |
+| `ctrl+s` | Save (used when the draft is created) |
+
+Quantities never change unless you press `u`.
+
+### Setup
+
+Settings (`s`) → AI section. Any **OpenAI-compatible** endpoint works:
+
+| Provider   | Endpoint URL                     | Key   | Model example   |
+| ---------- | -------------------------------- | ----- | --------------- |
+| OpenAI     | `https://api.openai.com/v1`      | yes   | `gpt-4o-mini`   |
+| Ollama     | `http://localhost:11434/v1`      | empty | `llama3.1`      |
+| LM Studio  | `http://localhost:1234/v1`       | empty | your model      |
+| OpenRouter | `https://openrouter.ai/api/v1`   | yes   | any             |
+
+Env vars override: `MOCO_TUI_AI_BASE_URL`, `MOCO_TUI_AI_API_KEY`, `MOCO_TUI_AI_MODEL`.
+
+Sent to the AI: offer items, task names, booked hours, time-entry descriptions.
+Use a local model if that data must stay on your machine.
+
+## MCP server (Claude Desktop / Claude Code)
+
+```bash
+moco-tui mcp
+```
+
+Runs a local stdio MCP server. Same settings + SQLite as the TUI.
+
+| Tool                   | Does                                               |
+| ---------------------- | -------------------------------------------------- |
+| `list_offers`          | Offers + state                                     |
+| `get_offer`            | Items (with index) + draft preview                 |
+| `get_time_entries`     | Booked hours by task                               |
+| `set_item_texts`       | Save titles / descriptions / quantity per item     |
+| `suggest_items`        | Use the configured AI endpoint                     |
+| `create_invoice_draft` | Dry run by default; creates a **draft** only       |
+| `draft_history`        | Drafts created so far                              |
+
+The MCP client's own model can write the texts (`get_time_entries` → `set_item_texts`).
+No AI endpoint needed for that.
+
+**Claude Desktop** → `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "moco": { "command": "moco-tui", "args": ["mcp"] }
+  }
+}
+```
+
+**Claude Code:**
+
+```bash
+claude mcp add moco -- moco-tui mcp
+```
+
 ## Headless (cron / CI)
 
 ```bash
@@ -67,7 +142,7 @@ SQLite, in the OS config folder:
 | macOS   | `~/Library/Application Support/moco-tui/moco-tui.db` |
 | Windows | `%APPDATA%\moco-tui\moco-tui.db`                  |
 
-- Holds settings, API key and draft history
+- Holds settings, API keys, draft history and saved AI item texts
 - File is `chmod 600` on Linux/macOS
 - `moco-tui where` prints the path
 - `MOCO_TUI_DB=/path/file.db` overrides it
